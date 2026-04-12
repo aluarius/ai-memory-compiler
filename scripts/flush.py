@@ -72,6 +72,10 @@ def append_to_daily_log(content: str, section: str = "Session") -> None:
         f.write(entry)
 
 
+MAX_RETRIES = 2
+RETRY_DELAY = 3  # seconds
+
+
 async def run_flush(context: str) -> str:
     """Use Claude Agent SDK to extract important knowledge from conversation context."""
     from claude_agent_sdk import (
@@ -114,32 +118,49 @@ respond with exactly: FLUSH_OK
 
 {context}"""
 
-    response = ""
+    last_error = None
 
-    try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(ROOT),
-                allowed_tools=[],
-                max_turns=2,
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        response += block.text
-            elif isinstance(message, ResultMessage):
-                pass
-    except Exception as e:
-        import traceback
-        logging.error("Agent SDK error: %s\n%s", e, traceback.format_exc())
-        response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
+    for attempt in range(1, MAX_RETRIES + 1):
+        response = ""
+        stderr_lines: list[str] = []
 
-    return response
+        def capture_stderr(line: str) -> None:
+            stderr_lines.append(line)
+            logging.debug("CLI stderr: %s", line)
+
+        try:
+            async for message in query(
+                prompt=prompt,
+                options=ClaudeAgentOptions(
+                    cwd=str(ROOT),
+                    allowed_tools=[],
+                    max_turns=2,
+                    stderr=capture_stderr,
+                ),
+            ):
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            response += block.text
+                elif isinstance(message, ResultMessage):
+                    pass
+            return response
+        except Exception as e:
+            import traceback
+            stderr_output = "\n".join(stderr_lines[-20:]) if stderr_lines else "(no stderr captured)"
+            logging.error(
+                "Agent SDK error (attempt %d/%d): %s\nCLI stderr:\n%s\n%s",
+                attempt, MAX_RETRIES, e, stderr_output, traceback.format_exc(),
+            )
+            last_error = e
+            if attempt < MAX_RETRIES:
+                logging.info("Retrying in %d seconds...", RETRY_DELAY)
+                await asyncio.sleep(RETRY_DELAY)
+
+    return f"FLUSH_ERROR: {type(last_error).__name__}: {last_error}"
 
 
-COMPILE_AFTER_HOUR = 18  # 6 PM local time
+COMPILE_AFTER_HOUR = 22  # 10 PM local time
 
 
 def maybe_trigger_compilation() -> None:
