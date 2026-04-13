@@ -1,5 +1,7 @@
 # LLM Personal Knowledge Base
 
+> Fork of [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler) with additional features (see [What's different](#whats-different-from-upstream)).
+
 **Your AI conversations compile themselves into a searchable knowledge base.**
 
 Adapted from [Karpathy's LLM Knowledge Base](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) architecture, but instead of clipping web articles, the raw data is your own conversations with Claude Code. When a session ends (or auto-compacts mid-session), Claude Code hooks capture the conversation transcript and spawn a background process that uses the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk) to extract the important stuff - decisions, lessons learned, patterns, gotchas - and appends it to a daily log. You then compile those daily logs into structured, cross-referenced knowledge articles organized by concept. Retrieval uses a simple index file instead of RAG - no vector database, no embeddings, just markdown.
@@ -74,6 +76,18 @@ Sensitive data (API keys, tokens, passwords, private keys, connection strings) i
 ## Why No RAG?
 
 Karpathy's insight: at personal scale (50-500 articles), the LLM reading a structured `index.md` outperforms vector similarity. The LLM understands what you're really asking; cosine similarity just finds similar words. RAG becomes necessary at ~2,000+ articles when the index exceeds the context window.
+
+## What's Different from Upstream
+
+This fork adds the following on top of [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler):
+
+- **MCP server** — knowledge base accessible as tools from any Claude Code session (`search_knowledge`, `list_articles`, `read_article`, `search_daily_logs`)
+- **Sensitive data redaction** — API keys, tokens, passwords, private keys are automatically masked before writing to daily logs (`hooks/sanitize.py`)
+- **Retry with stderr capture** — flush.py retries on transient CLI failures and captures real stderr for diagnostics instead of the generic "Check stderr output for details"
+- **Post-compile health checks** — structural lint runs automatically after every compilation
+- **Log retention** — compiled daily logs older than 30 days are archived to `daily/archive/`
+- **Temp file cleanup** — orphaned context files from crashed flushes are cleaned up automatically
+- **Global hooks** — hooks configured in `~/.claude/settings.json` to capture sessions from all projects, not just this one
 
 ## Technical Reference
 
