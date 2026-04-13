@@ -135,6 +135,10 @@ def main() -> None:
         logging.info("SKIP: only %d turns (min %d)", turn_count, MIN_TURNS_TO_FLUSH)
         return
 
+    # Redact sensitive data before persisting
+    from sanitize import sanitize
+    context = sanitize(context)
+
     # Write context to a temp file for the background process
     timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
     context_file = STATE_DIR / f"session-flush-{session_id}-{timestamp}.md"

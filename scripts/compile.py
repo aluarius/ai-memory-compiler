@@ -219,6 +219,72 @@ def main():
     print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
     print(f"Knowledge base: {len(articles)} articles")
 
+    # Post-compile health check (structural only, no API cost)
+    run_post_compile_lint()
+
+    # Archive old compiled logs
+    archive_old_logs(state)
+
+
+def run_post_compile_lint() -> None:
+    """Run structural lint checks after compilation."""
+    from lint import (
+        check_broken_links,
+        check_orphan_pages,
+        check_sparse_articles,
+        check_stale_articles,
+    )
+
+    print("\nRunning post-compile health checks...")
+    issues = []
+    for name, fn in [
+        ("Broken links", check_broken_links),
+        ("Orphan pages", check_orphan_pages),
+        ("Sparse articles", check_sparse_articles),
+        ("Stale articles", check_stale_articles),
+    ]:
+        found = fn()
+        issues.extend(found)
+        if found:
+            print(f"  [{name}] {len(found)} issue(s)")
+
+    if not issues:
+        print("  All checks passed.")
+    else:
+        errors = sum(1 for i in issues if i["severity"] == "error")
+        print(f"  Total: {len(issues)} issues ({errors} errors)")
+
+
+ARCHIVE_AFTER_DAYS = 30
+
+
+def archive_old_logs(state: dict) -> None:
+    """Move compiled daily logs older than ARCHIVE_AFTER_DAYS to daily/archive/."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc).astimezone() - timedelta(days=ARCHIVE_AFTER_DAYS)
+    ingested = state.get("ingested", {})
+    archive_dir = DAILY_DIR / "archive"
+
+    for log_path in list_raw_files():
+        # Only archive if already compiled
+        if log_path.name not in ingested:
+            continue
+
+        # Parse date from filename (YYYY-MM-DD.md)
+        try:
+            log_date = datetime.strptime(log_path.stem, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            continue
+
+        if log_date < cutoff:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            dest = archive_dir / log_path.name
+            log_path.rename(dest)
+            print(f"  Archived: {log_path.name}")
+
 
 if __name__ == "__main__":
     main()

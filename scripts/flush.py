@@ -210,6 +210,23 @@ def maybe_trigger_compilation() -> None:
         logging.error("Failed to spawn compile.py: %s", e)
 
 
+TEMP_MAX_AGE = 3600  # 1 hour
+
+
+def cleanup_old_temp_files() -> None:
+    """Remove orphaned temp context files older than TEMP_MAX_AGE seconds."""
+    now = time.time()
+    patterns = ["session-flush-*.md", "flush-context-*.md"]
+    for pattern in patterns:
+        for f in SCRIPTS_DIR.glob(pattern):
+            try:
+                if now - f.stat().st_mtime > TEMP_MAX_AGE:
+                    f.unlink()
+                    logging.info("Cleaned up stale temp file: %s", f.name)
+            except OSError:
+                pass
+
+
 def main():
     if len(sys.argv) < 3:
         logging.error("Usage: %s <context_file.md> <session_id>", sys.argv[0])
@@ -219,6 +236,9 @@ def main():
     session_id = sys.argv[2]
 
     logging.info("flush.py started for session %s, context: %s", session_id, context_file)
+
+    # Opportunistic cleanup of stale temp files from crashed runs
+    cleanup_old_temp_files()
 
     if not context_file.exists():
         logging.error("Context file not found: %s", context_file)
