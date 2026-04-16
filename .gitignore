@@ -9,6 +9,7 @@ scripts/last-flush.json
 scripts/flush.log
 scripts/compile.log
 scripts/.locks/
+scripts/.last-codex-import
 scripts/session-flush-*
 scripts/flush-context-*
 

@@ -87,29 +87,36 @@ Available tools:
 
 `read_article()` now validates paths and will refuse attempts to escape `knowledge/`.
 
-## Mixed Agent Workflow
+## Multi-Agent Support: Claude Code + Codex
 
-The knowledge base can combine multiple coding agents as long as they feed the
-same normalized daily-log pipeline.
+Both Claude Code and Codex sessions are captured automatically into the same knowledge base.
 
-- **Claude Code**: automatic capture via hooks
-- **Codex or other agents**: import a saved transcript with `scripts/import_session.py`
+- **Claude Code** — automatic capture via `SessionEnd` / `PreCompact` hooks in `~/.claude/settings.json`
+- **Codex** — automatic capture via `Stop` hook in `~/.codex/hooks.json`
+- **Other agents** — manual import with `scripts/import_session.py`
 
-For a thin interactive wrapper around Codex that auto-imports the finished
-session after exit:
+All sessions are tagged with source metadata (`agent=... | provider=... | session=... | cwd=...`) so mixed-agent history stays auditable.
 
-```bash
-uv run python scripts/codex_session.py -- -m gpt-5.4
-uv run python scripts/codex_session.py -- resume --last
+### Codex Setup
+
+Add the hook to `~/.codex/hooks.json` (inside the `"Stop"` array):
+
+```json
+{
+  "type": "command",
+  "command": "cd /path/to/claude-memory-compiler && uv run python hooks/codex-stop.py",
+  "timeout": 10
+}
 ```
 
-Imported sessions are tagged in the daily log with source metadata
-(`agent=... | provider=... | session=...`) so mixed-agent history stays auditable.
+The hook finds the most recent Codex transcript (`~/.codex/sessions/`), parses it, and feeds it through the same flush pipeline. Manual import and the interactive wrapper also work:
 
-For the pragmatic rollout plan for Codex support without overengineering, see
-[docs/codex-parity-architecture.md](docs/codex-parity-architecture.md). For the
-currently supported Codex transcript shape, see
-[docs/codex-transcripts.md](docs/codex-transcripts.md).
+```bash
+uv run python scripts/import_session.py /path/to/transcript.jsonl --agent codex --provider openai
+uv run python scripts/codex_session.py -- -m gpt-5.4
+```
+
+For the supported Codex transcript shape, see [docs/codex-transcripts.md](docs/codex-transcripts.md).
 
 ## Security
 
@@ -130,7 +137,7 @@ This fork adds the following on top of [coleam00/claude-memory-compiler](https:/
 - **Log retention** — compiled daily logs older than 30 days are archived to `daily/archive/`
 - **Temp file cleanup** — orphaned context files from crashed flushes are cleaned up automatically
 - **Global hooks** — hooks configured in `~/.claude/settings.json` to capture sessions from all projects, not just this one
-- **Shared multi-agent ingestion** — Claude hooks plus transcript import for Codex/other agents into one KB
+- **Automatic Codex capture** — `Stop` hook for Codex auto-imports sessions into the same KB alongside Claude Code
 - **File locking** — concurrent flush/compile processes safely share state files and daily logs (`scripts/locking.py`)
 - **Shared session parsing** — hooks deduplicated into `scripts/session_utils.py` with normalized `SessionMetadata`
 - **Proper process detachment** — background flush/compile processes detach from hook session group on all platforms
