@@ -6,12 +6,15 @@ from datetime import datetime, timezone
 # ── Paths ──────────────────────────────────────────────────────────────
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT_DIR / "daily"
+DAILY_ARCHIVE_DIR = DAILY_DIR / "archive"
 KNOWLEDGE_DIR = ROOT_DIR / "knowledge"
 CONCEPTS_DIR = KNOWLEDGE_DIR / "concepts"
 CONNECTIONS_DIR = KNOWLEDGE_DIR / "connections"
 QA_DIR = KNOWLEDGE_DIR / "qa"
 REPORTS_DIR = ROOT_DIR / "reports"
 SCRIPTS_DIR = ROOT_DIR / "scripts"
+LOCKS_DIR = SCRIPTS_DIR / ".locks"
+DAILY_LOG_LOCK_FILE = LOCKS_DIR / "daily-log.lock"
 HOOKS_DIR = ROOT_DIR / "hooks"
 AGENTS_FILE = ROOT_DIR / "AGENTS.md"
 

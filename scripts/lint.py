@@ -15,9 +15,12 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from codex_exec import run_codex_prompt
 from config import KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
+from runtime_config import get_codex_model, get_task_runtime
 from utils import (
     count_inbound_links,
+    daily_source_exists,
     extract_wikilinks,
     file_hash,
     get_article_word_count,
@@ -25,7 +28,7 @@ from utils import (
     list_wiki_articles,
     load_state,
     read_all_wiki_content,
-    save_state,
+    update_state,
     wiki_article_exists,
 )
 
@@ -40,7 +43,14 @@ def check_broken_links() -> list[dict]:
         rel = article.relative_to(KNOWLEDGE_DIR)
         for link in extract_wikilinks(content):
             if link.startswith("daily/"):
-                continue  # daily log references are valid
+                if not daily_source_exists(link):
+                    issues.append({
+                        "severity": "error",
+                        "check": "broken_link",
+                        "file": str(rel),
+                        "detail": f"Broken source link: [[{link}]] - daily log does not exist",
+                    })
+                continue
             if not wiki_article_exists(link):
                 issues.append({
                     "severity": "error",
@@ -147,14 +157,6 @@ def check_sparse_articles() -> list[dict]:
 
 async def check_contradictions() -> list[dict]:
     """Use LLM to detect contradictions across articles."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
     wiki_content = read_all_wiki_content()
 
     prompt = f"""Review this knowledge base for contradictions, inconsistencies, or
@@ -180,19 +182,37 @@ If no issues found, output exactly: NO_ISSUES
 Do NOT output anything else - no preamble, no explanation, just the formatted lines."""
 
     response = ""
+    runtime = get_task_runtime("lint")
     try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(ROOT_DIR),
-                allowed_tools=[],
-                max_turns=2,
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        response += block.text
+        if runtime == "codex":
+            response = await asyncio.to_thread(
+                run_codex_prompt,
+                prompt,
+                cwd=ROOT_DIR,
+                allow_edits=False,
+                model=get_codex_model(),
+            )
+        else:
+            from claude_agent_sdk import (
+                AssistantMessage,
+                ClaudeAgentOptions,
+                ResultMessage,
+                TextBlock,
+                query,
+            )
+
+            async for message in query(
+                prompt=prompt,
+                options=ClaudeAgentOptions(
+                    cwd=str(ROOT_DIR),
+                    allowed_tools=[],
+                    max_turns=2,
+                ),
+            ):
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            response += block.text
     except Exception as e:
         return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": f"LLM check failed: {e}"}]
 
@@ -292,9 +312,10 @@ def main():
     print(f"\nReport saved to: {report_path}")
 
     # Update state
-    state = load_state()
-    state["last_lint"] = now_iso()
-    save_state(state)
+    def mutate(state: dict) -> None:
+        state["last_lint"] = now_iso()
+
+    update_state(mutate)
 
     # Summary
     errors = sum(1 for i in all_issues if i["severity"] == "error")

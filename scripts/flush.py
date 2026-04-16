@@ -13,31 +13,52 @@ from __future__ import annotations
 
 # Recursion prevention: set this BEFORE any imports that might trigger Claude
 import os
+
 os.environ["CLAUDE_INVOKED_BY"] = "memory_flush"
 
+import argparse
 import asyncio
 import json
 import logging
 import sys
 import time
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+
+from codex_exec import run_codex_prompt
+from config import DAILY_LOG_LOCK_FILE
+from locking import file_lock
+from runtime_config import get_codex_model, get_task_runtime
+from session_utils import SessionMetadata, format_session_header
+from utils import file_hash
 
 ROOT = Path(__file__).resolve().parent.parent
 DAILY_DIR = ROOT / "daily"
+REPORTS_DIR = ROOT / "reports"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
+STATE_LOCK_FILE = SCRIPTS_DIR / ".locks" / "flush-state.lock"
+RUNTIME_EVENTS_FILE = REPORTS_DIR / "runtime-events.md"
+RUNTIME_EVENTS_LOCK_FILE = SCRIPTS_DIR / ".locks" / "runtime-events.lock"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
 
 # Set up file-based logging so we can verify the background process ran.
 # The parent process sends stdout/stderr to DEVNULL (to avoid the inherited
-# file handle bug on Windows), so this is our only observability channel.
+# file handle bug on Windows), so this is our main observability channel.
 logging.basicConfig(
     filename=str(LOG_FILE),
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+MAX_RETRIES = 2
+RETRY_DELAY = 3  # seconds
+COMPILE_AFTER_HOUR = 22  # 10 PM local time
+TEMP_MAX_AGE = 3600  # 1 hour
+DEDUP_WINDOW_SECONDS = 120
+MAX_RECENT_FLUSHES = 64
 
 
 def load_flush_state() -> dict:
@@ -46,47 +67,85 @@ def load_flush_state() -> dict:
             return json.loads(STATE_FILE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
-    return {}
+    return {"recent": []}
 
 
 def save_flush_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def append_to_daily_log(content: str, section: str = "Session") -> None:
-    """Append content to today's daily log."""
+def was_recently_flushed(session_id: str, context_hash: str) -> bool:
+    with file_lock(STATE_LOCK_FILE):
+        state = load_flush_state()
+        now = time.time()
+        recent = state.get("recent", [])
+        return any(
+            item.get("session_id") == session_id
+            and item.get("context_hash") == context_hash
+            and now - item.get("timestamp", 0) < DEDUP_WINDOW_SECONDS
+            for item in recent
+        )
+
+
+def remember_flush(session_id: str, context_hash: str) -> None:
+    with file_lock(STATE_LOCK_FILE):
+        state = load_flush_state()
+        now = time.time()
+
+        recent = [
+            item
+            for item in state.get("recent", [])
+            if now - item.get("timestamp", 0) < DEDUP_WINDOW_SECONDS
+        ]
+        recent.append(
+            {
+                "session_id": session_id,
+                "context_hash": context_hash,
+                "timestamp": now,
+            }
+        )
+        state["recent"] = recent[-MAX_RECENT_FLUSHES:]
+        save_flush_state(state)
+
+
+def append_runtime_event(kind: str, message: str, metadata: SessionMetadata) -> None:
+    """Persist operational events outside the raw conversation corpus."""
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    header = format_session_header(metadata)
+    entry = f"## [{timestamp}] {kind}\n{header}\n\n{message.strip()}\n\n"
+
+    with file_lock(RUNTIME_EVENTS_LOCK_FILE):
+        if not RUNTIME_EVENTS_FILE.exists():
+            RUNTIME_EVENTS_FILE.write_text("# Runtime Events\n\n", encoding="utf-8")
+        with open(RUNTIME_EVENTS_FILE, "a", encoding="utf-8") as f:
+            f.write(entry)
+
+
+def append_to_daily_log(content: str, metadata: SessionMetadata, section: str = "Session") -> None:
+    """Append meaningful extracted content to today's daily log."""
     today = datetime.now(timezone.utc).astimezone()
     log_path = DAILY_DIR / f"{today.strftime('%Y-%m-%d')}.md"
 
-    if not log_path.exists():
-        DAILY_DIR.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
-            f"# Daily Log: {today.strftime('%Y-%m-%d')}\n\n## Sessions\n\n## Memory Maintenance\n\n",
-            encoding="utf-8",
-        )
+    DAILY_DIR.mkdir(parents=True, exist_ok=True)
 
-    time_str = today.strftime("%H:%M")
-    entry = f"### {section} ({time_str})\n\n{content}\n\n"
+    with file_lock(DAILY_LOG_LOCK_FILE):
+        if not log_path.exists():
+            log_path.write_text(
+                f"# Daily Log: {today.strftime('%Y-%m-%d')}\n\n## Sessions\n\n## Memory Maintenance\n\n",
+                encoding="utf-8",
+            )
 
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(entry)
+        time_str = today.strftime("%H:%M")
+        header = format_session_header(metadata)
+        entry = f"### {section} ({time_str})\n\n{header}\n\n{content.strip()}\n\n"
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(entry)
 
 
-MAX_RETRIES = 2
-RETRY_DELAY = 3  # seconds
-
-
-async def run_flush(context: str) -> str:
-    """Use Claude Agent SDK to extract important knowledge from conversation context."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
-    prompt = f"""Review the conversation context below and respond with a concise summary
+def build_flush_prompt(context: str) -> str:
+    return f"""Review the conversation context below and respond with a concise summary
 of important items that should be preserved in the daily log.
 Do NOT use any tools — just return plain text.
 
@@ -118,6 +177,17 @@ respond with exactly: FLUSH_OK
 
 {context}"""
 
+
+async def run_flush_claude(prompt: str) -> str:
+    """Use Claude Agent SDK to extract important knowledge from conversation context."""
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ClaudeAgentOptions,
+        ResultMessage,
+        TextBlock,
+        query,
+    )
+
     last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -144,13 +214,18 @@ respond with exactly: FLUSH_OK
                             response += block.text
                 elif isinstance(message, ResultMessage):
                     pass
-            return response
+            return response.strip()
         except Exception as e:
             import traceback
+
             stderr_output = "\n".join(stderr_lines[-20:]) if stderr_lines else "(no stderr captured)"
             logging.error(
                 "Agent SDK error (attempt %d/%d): %s\nCLI stderr:\n%s\n%s",
-                attempt, MAX_RETRIES, e, stderr_output, traceback.format_exc(),
+                attempt,
+                MAX_RETRIES,
+                e,
+                stderr_output,
+                traceback.format_exc(),
             )
             last_error = e
             if attempt < MAX_RETRIES:
@@ -160,7 +235,25 @@ respond with exactly: FLUSH_OK
     return f"FLUSH_ERROR: {type(last_error).__name__}: {last_error}"
 
 
-COMPILE_AFTER_HOUR = 22  # 10 PM local time
+async def run_flush(context: str) -> str:
+    prompt = build_flush_prompt(context)
+    try:
+        runtime = get_task_runtime("flush")
+        logging.info("Flush runtime: %s", runtime)
+
+        if runtime == "codex":
+            return await asyncio.to_thread(
+                run_codex_prompt,
+                prompt,
+                cwd=ROOT,
+                allow_edits=False,
+                model=get_codex_model(),
+            )
+
+        return await run_flush_claude(prompt)
+    except Exception as e:
+        logging.exception("Flush runtime failed")
+        return f"FLUSH_ERROR: {type(e).__name__}: {e}"
 
 
 def maybe_trigger_compilation() -> None:
@@ -171,7 +264,6 @@ def maybe_trigger_compilation() -> None:
     if now.hour < COMPILE_AFTER_HOUR:
         return
 
-    # Check if today's log has already been compiled
     today_log = f"{now.strftime('%Y-%m-%d')}.md"
     compile_state_file = SCRIPTS_DIR / "state.json"
     if compile_state_file.exists():
@@ -179,13 +271,9 @@ def maybe_trigger_compilation() -> None:
             compile_state = json.loads(compile_state_file.read_text(encoding="utf-8"))
             ingested = compile_state.get("ingested", {})
             if today_log in ingested:
-                # Already compiled today - check if the log has changed since
-                from hashlib import sha256
                 log_path = DAILY_DIR / today_log
-                if log_path.exists():
-                    current_hash = sha256(log_path.read_bytes()).hexdigest()[:16]
-                    if ingested[today_log].get("hash") == current_hash:
-                        return  # log unchanged since last compile
+                if log_path.exists() and ingested[today_log].get("hash") == file_hash(log_path):
+                    return
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -204,19 +292,21 @@ def maybe_trigger_compilation() -> None:
         kwargs["start_new_session"] = True
 
     try:
-        log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a")
+        log_handle = open(str(SCRIPTS_DIR / "compile.log"), "a", encoding="utf-8")
         _sp.Popen(cmd, stdout=log_handle, stderr=_sp.STDOUT, cwd=str(ROOT), **kwargs)
+        log_handle.close()  # parent releases its copy; child keeps writing
     except Exception as e:
         logging.error("Failed to spawn compile.py: %s", e)
-
-
-TEMP_MAX_AGE = 3600  # 1 hour
+        try:
+            log_handle.close()
+        except Exception:
+            pass
 
 
 def cleanup_old_temp_files() -> None:
     """Remove orphaned temp context files older than TEMP_MAX_AGE seconds."""
     now = time.time()
-    patterns = ["session-flush-*.md", "flush-context-*.md"]
+    patterns = ["session-flush-*.md", "flush-context-*.md", "import-flush-*.md"]
     for pattern in patterns:
         for f in SCRIPTS_DIR.glob(pattern):
             try:
@@ -227,69 +317,73 @@ def cleanup_old_temp_files() -> None:
                 pass
 
 
-def main():
-    if len(sys.argv) < 3:
-        logging.error("Usage: %s <context_file.md> <session_id>", sys.argv[0])
-        sys.exit(1)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Extract long-term memory from session context")
+    parser.add_argument("context_file", type=Path)
+    parser.add_argument("session_id", type=str)
+    parser.add_argument("--agent", default="claude_code")
+    parser.add_argument("--provider", default="anthropic")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--cwd", default=None)
+    parser.add_argument("--source", default=None)
+    return parser.parse_args()
 
-    context_file = Path(sys.argv[1])
-    session_id = sys.argv[2]
 
-    logging.info("flush.py started for session %s, context: %s", session_id, context_file)
+def main() -> None:
+    args = parse_args()
+    context_file = args.context_file
+    metadata = SessionMetadata(
+        session_id=args.session_id,
+        agent=args.agent,
+        provider=args.provider,
+        model=args.model,
+        cwd=args.cwd,
+        transcript_path=str(context_file),
+        source=args.source,
+    )
 
-    # Opportunistic cleanup of stale temp files from crashed runs
+    logging.info("flush.py started for session %s, context: %s", metadata.session_id, context_file)
+
     cleanup_old_temp_files()
 
     if not context_file.exists():
         logging.error("Context file not found: %s", context_file)
         return
 
-    # Deduplication: skip if same session was flushed within 60 seconds
-    state = load_flush_state()
-    if (
-        state.get("session_id") == session_id
-        and time.time() - state.get("timestamp", 0) < 60
-    ):
-        logging.info("Skipping duplicate flush for session %s", session_id)
-        context_file.unlink(missing_ok=True)
-        return
-
-    # Read pre-extracted context
     context = context_file.read_text(encoding="utf-8").strip()
     if not context:
         logging.info("Context file is empty, skipping")
         context_file.unlink(missing_ok=True)
         return
 
-    logging.info("Flushing session %s: %d chars", session_id, len(context))
+    context_hash = sha256(context.encode("utf-8")).hexdigest()[:16]
+    if was_recently_flushed(metadata.session_id, context_hash):
+        logging.info("Skipping duplicate flush for session %s", metadata.session_id)
+        context_file.unlink(missing_ok=True)
+        return
 
-    # Run the LLM extraction
-    response = asyncio.run(run_flush(context))
+    logging.info("Flushing session %s: %d chars", metadata.session_id, len(context))
 
-    # Append to daily log
-    if "FLUSH_OK" in response:
+    try:
+        response = asyncio.run(run_flush(context))
+    except Exception as e:
+        logging.exception("Unhandled flush failure")
+        response = f"FLUSH_ERROR: {type(e).__name__}: {e}"
+
+    if response == "FLUSH_OK":
         logging.info("Result: FLUSH_OK")
-        append_to_daily_log(
-            "FLUSH_OK - Nothing worth saving from this session", "Memory Flush"
-        )
-    elif "FLUSH_ERROR" in response:
+    elif response.startswith("FLUSH_ERROR"):
         logging.error("Result: %s", response)
-        append_to_daily_log(response, "Memory Flush")
+        append_runtime_event("flush-error", response, metadata)
     else:
         logging.info("Result: saved to daily log (%d chars)", len(response))
-        append_to_daily_log(response, "Session")
+        append_to_daily_log(response, metadata, "Session")
 
-    # Update dedup state
-    save_flush_state({"session_id": session_id, "timestamp": time.time()})
-
-    # Clean up context file
+    remember_flush(metadata.session_id, context_hash)
     context_file.unlink(missing_ok=True)
-
-    # End-of-day auto-compilation: if it's past the compile hour and today's
-    # log hasn't been compiled yet, trigger compile.py in the background.
     maybe_trigger_compilation()
 
-    logging.info("Flush complete for session %s", session_id)
+    logging.info("Flush complete for session %s", metadata.session_id)
 
 
 if __name__ == "__main__":

@@ -4,31 +4,53 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import Callable
 
 from config import (
     CONCEPTS_DIR,
     CONNECTIONS_DIR,
     DAILY_DIR,
+    DAILY_ARCHIVE_DIR,
     INDEX_FILE,
     KNOWLEDGE_DIR,
+    LOCKS_DIR,
     LOG_FILE,
     QA_DIR,
     STATE_FILE,
 )
+from locking import file_lock
 
 
 # ── State management ──────────────────────────────────────────────────
 
 def load_state() -> dict:
     """Load persistent state from state.json."""
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    return {"ingested": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}
+    lock_path = LOCKS_DIR / "state.lock"
+    with file_lock(lock_path):
+        if STATE_FILE.exists():
+            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return {"ingested": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}
 
 
 def save_state(state: dict) -> None:
     """Save state to state.json."""
-    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    lock_path = LOCKS_DIR / "state.lock"
+    with file_lock(lock_path):
+        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def update_state(mutator: Callable[[dict], None]) -> dict:
+    """Atomically load, mutate, and save state.json."""
+    lock_path = LOCKS_DIR / "state.lock"
+    with file_lock(lock_path):
+        if STATE_FILE.exists():
+            state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        else:
+            state = {"ingested": {}, "query_count": 0, "last_lint": None, "total_cost": 0.0}
+
+        mutator(state)
+        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        return state
 
 
 # ── File hashing ──────────────────────────────────────────────────────
@@ -60,6 +82,46 @@ def wiki_article_exists(link: str) -> bool:
     """Check if a wikilinked article exists on disk."""
     path = KNOWLEDGE_DIR / f"{link}.md"
     return path.exists()
+
+
+def resolve_daily_source(link: str) -> Path | None:
+    """Resolve a daily source wikilink across active and archived logs."""
+    normalized = link.removesuffix(".md").strip("/")
+    if normalized.startswith("daily/archive/"):
+        candidates = [DAILY_ARCHIVE_DIR / f"{normalized.removeprefix('daily/archive/')}.md"]
+    elif normalized.startswith("daily/"):
+        name = normalized.removeprefix("daily/")
+        candidates = [
+            DAILY_DIR / f"{name}.md",
+            DAILY_ARCHIVE_DIR / f"{name}.md",
+        ]
+    else:
+        candidates = [
+            DAILY_DIR / f"{normalized}.md",
+            DAILY_ARCHIVE_DIR / f"{normalized}.md",
+        ]
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def daily_source_exists(link: str) -> bool:
+    """Check if a daily log wikilink exists on disk."""
+    return resolve_daily_source(link) is not None
+
+
+def safe_join(root: Path, relative_path: str) -> Path | None:
+    """Safely join an untrusted relative path under a trusted root."""
+    candidate = (root / relative_path).resolve()
+    root_resolved = root.resolve()
+
+    try:
+        candidate.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return candidate
 
 
 # ── Wiki content helpers ──────────────────────────────────────────────

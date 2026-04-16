@@ -16,23 +16,17 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from codex_exec import run_codex_prompt
 from config import KNOWLEDGE_DIR, QA_DIR, now_iso
-from utils import load_state, read_all_wiki_content, save_state
+from runtime_config import get_codex_model, get_task_runtime
+from utils import read_wiki_index, update_state
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 async def run_query(question: str, file_back: bool = False) -> str:
     """Query the knowledge base and optionally file the answer back."""
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ResultMessage,
-        TextBlock,
-        query,
-    )
-
-    wiki_content = read_all_wiki_content()
+    wiki_index = read_wiki_index()
 
     tools = ["Read", "Glob", "Grep"]
     if file_back:
@@ -65,14 +59,18 @@ consulting the knowledge base below.
 
 1. Read the INDEX section first - it lists every article with a one-line summary
 2. Identify 3-10 articles that are relevant to the question
-3. Read those articles carefully (they're included below)
+3. Read those articles from the knowledge base on disk using tools
 4. Synthesize a clear, thorough answer
 5. Cite your sources using [[wikilinks]] (e.g., [[concepts/supabase-auth]])
 6. If the knowledge base doesn't contain relevant information, say so honestly
 
-## Knowledge Base
+## Knowledge Base Index
 
-{wiki_content}
+{wiki_index}
+
+## Knowledge Base Location
+
+Read articles from: {KNOWLEDGE_DIR}
 
 ## Question
 
@@ -81,32 +79,54 @@ consulting the knowledge base below.
 
     answer = ""
     cost = 0.0
+    runtime = get_task_runtime("query")
 
-    try:
-        async for message in query(
-            prompt=prompt,
-            options=ClaudeAgentOptions(
-                cwd=str(ROOT_DIR),
-                system_prompt={"type": "preset", "preset": "claude_code"},
-                allowed_tools=tools,
-                permission_mode="acceptEdits",
-                max_turns=15,
-            ),
-        ):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        answer += block.text
-            elif isinstance(message, ResultMessage):
-                cost = message.total_cost_usd or 0.0
-    except Exception as e:
-        answer = f"Error querying knowledge base: {e}"
+    if runtime == "codex":
+        try:
+            answer = await asyncio.to_thread(
+                run_codex_prompt,
+                prompt,
+                cwd=ROOT_DIR,
+                allow_edits=file_back,
+                model=get_codex_model(),
+            )
+        except Exception as e:
+            answer = f"Error querying knowledge base: {e}"
+    else:
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ClaudeAgentOptions,
+            ResultMessage,
+            TextBlock,
+            query,
+        )
+
+        try:
+            async for message in query(
+                prompt=prompt,
+                options=ClaudeAgentOptions(
+                    cwd=str(ROOT_DIR),
+                    system_prompt={"type": "preset", "preset": "claude_code"},
+                    allowed_tools=tools,
+                    permission_mode="acceptEdits",
+                    max_turns=15,
+                ),
+            ):
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            answer += block.text
+                elif isinstance(message, ResultMessage):
+                    cost = message.total_cost_usd or 0.0
+        except Exception as e:
+            answer = f"Error querying knowledge base: {e}"
 
     # Update state
-    state = load_state()
-    state["query_count"] = state.get("query_count", 0) + 1
-    state["total_cost"] = state.get("total_cost", 0.0) + cost
-    save_state(state)
+    def mutate(state: dict) -> None:
+        state["query_count"] = state.get("query_count", 0) + 1
+        state["total_cost"] = state.get("total_cost", 0.0) + cost
+
+    update_state(mutate)
 
     return answer
 

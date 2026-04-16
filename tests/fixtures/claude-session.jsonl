@@ -1,0 +1,5 @@
+{"message":{"role":"user","content":"How should we structure the compiler?"}}
+{"message":{"role":"assistant","content":[{"type":"text","text":"Keep the scripts flat and add tests before refactors."}]}}
+{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Read"}]}}
+{"message":{"role":"user","content":"Add Codex import support too."}}
+{"message":{"role":"assistant","content":"Support manual transcript import first, then automate only if the runtime exposes hooks."}}

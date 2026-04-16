@@ -39,6 +39,8 @@ Each file follows this format:
 
 ### Session (HH:MM) - Brief Title
 
+_Source: agent=claude_code | provider=anthropic | session=... | cwd=..._
+
 **Context:** What the user was working on.
 
 **Key Exchanges:**
@@ -308,13 +310,23 @@ llm-personal-kb/
 |   |-- query.py                     #   Ask questions (index-guided, no RAG)
 |   |-- lint.py                      #   7 health checks
 |   |-- flush.py                     #   Extract memories from conversations (background)
+|   |-- import_session.py            #   Feed external agents (e.g. Codex) into the same pipeline
+|   |-- mcp_server.py                #   MCP server for knowledge base access
 |   |-- config.py                    #   Path constants
 |   |-- utils.py                     #   Shared helpers
+|   |-- locking.py                   #   File-based locking for concurrent access
+|   |-- session_utils.py             #   Shared transcript parsing and session metadata
+|   |-- runtime_config.py            #   Provider/agent runtime configuration
+|   |-- codex_exec.py                #   Codex CLI execution helpers
+|   |-- codex_session.py             #   Codex transcript parsing
 |-- hooks/                           # Claude Code hooks
 |   |-- session-start.py             #   Injects knowledge into every session
 |   |-- session-end.py               #   Extracts conversation -> daily log
 |   |-- pre-compact.py               #   Safety net: captures context before compaction
-|-- reports/                         # Lint reports (gitignored)
+|   |-- sanitize.py                  #   Redacts sensitive data before persistence
+|-- docs/                            # Architecture and design docs
+|-- tests/                           # Test suite
+|-- reports/                         # Lint reports and runtime events (gitignored)
 ```
 
 ---
@@ -322,6 +334,8 @@ llm-personal-kb/
 ## Hook System (Automatic Capture)
 
 Hooks are configured in `.claude/settings.json` and fire automatically when you use Claude Code in this project.
+Other agents can feed the same knowledge base by exporting a transcript and
+running `scripts/import_session.py`.
 
 ### `.claude/settings.json` Format
 
@@ -348,7 +362,7 @@ Commands use simple relative paths from the project root. Empty `matcher` catche
 
 **`session-end.py`** (SessionEnd)
 - Reads hook input from stdin (JSON with `session_id`, `transcript_path`, `cwd`)
-- Copies the raw JSONL transcript to a temp file (no parsing in the hook - keeps it fast)
+- Parses the JSONL transcript, sanitizes sensitive data, and writes extracted context to a temp file
 - Spawns `flush.py` as a fully detached background process
 - Recursion guard: exits immediately if `CLAUDE_INVOKED_BY` env var is set
 
@@ -371,12 +385,12 @@ This ensures flush.py survives after Claude Code's hook process exits.
 **What flush.py does:**
 1. Sets `CLAUDE_INVOKED_BY=memory_flush` env var (prevents recursive hook firing)
 2. Reads the pre-extracted conversation context from the temp `.md` file
-3. Skips if context is empty or if same session was flushed within 60 seconds (deduplication)
+3. Skips if context is empty or if same session+content was flushed within 120 seconds (deduplication)
 4. Calls Claude Agent SDK (`query()` with `allowed_tools=[]`, `max_turns=2`)
 5. Claude decides what's worth saving - returns structured bullet points or `FLUSH_OK`
 6. Appends result to `daily/YYYY-MM-DD.md`
 7. Cleans up temp context file
-8. **End-of-day auto-compilation:** If it's past 6 PM local time (`COMPILE_AFTER_HOUR = 18`) and today's daily log has changed since its last compilation (hash comparison against `state.json`), spawns `compile.py` as another detached background process. This means compilation happens automatically once a day without needing a cron job or manual trigger.
+8. **End-of-day auto-compilation:** If it's past 10 PM local time (`COMPILE_AFTER_HOUR = 22`) and today's daily log has changed since its last compilation (hash comparison against `state.json`), spawns `compile.py` as another detached background process. This means compilation happens automatically once a day without needing a cron job or manual trigger.
 
 ### JSONL Transcript Format
 

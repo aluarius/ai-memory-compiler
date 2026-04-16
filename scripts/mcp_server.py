@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from utils import safe_join
 
 # Resolve paths relative to this file so it works from any cwd
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -95,7 +96,10 @@ def read_article(path: str) -> str:
     if not path.endswith(".md"):
         path += ".md"
 
-    article = KNOWLEDGE_DIR / path
+    article = safe_join(KNOWLEDGE_DIR, path)
+    if article is None:
+        return f"Invalid article path: {path}"
+
     if not article.exists():
         # Try fuzzy match
         slug = Path(path).stem
