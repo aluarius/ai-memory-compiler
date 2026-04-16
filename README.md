@@ -1,6 +1,6 @@
-# LLM Personal Knowledge Base
+# AI Memory Compiler
 
-> Fork of [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler) with additional features (see [What's different](#whats-different-from-upstream)).
+> Originally forked from [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler), now an independent project with multi-agent support.
 
 **Your AI conversations compile themselves into a searchable knowledge base.**
 
@@ -13,8 +13,8 @@ Claude Agent SDK usage is covered by your Claude subscription (Max, Team, or Ent
 ## Quick Start
 
 ```bash
-git clone https://github.com/aluarius/claude-memory-compiler
-cd claude-memory-compiler
+git clone https://github.com/aluarius/ai-memory-compiler
+cd ai-memory-compiler
 uv sync
 ```
 
@@ -30,7 +30,7 @@ Add to `~/.claude/settings.json` inside the `"hooks"` object:
     "matcher": "",
     "hooks": [{
       "type": "command",
-      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/session-start.py",
+      "command": "cd /path/to/ai-memory-compiler && uv run python hooks/session-start.py",
       "timeout": 15
     }]
   }
@@ -40,7 +40,7 @@ Add to `~/.claude/settings.json` inside the `"hooks"` object:
     "matcher": "",
     "hooks": [{
       "type": "command",
-      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/pre-compact.py",
+      "command": "cd /path/to/ai-memory-compiler && uv run python hooks/pre-compact.py",
       "timeout": 10
     }]
   }
@@ -50,7 +50,7 @@ Add to `~/.claude/settings.json` inside the `"hooks"` object:
     "matcher": "",
     "hooks": [{
       "type": "command",
-      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/session-end.py",
+      "command": "cd /path/to/ai-memory-compiler && uv run python hooks/session-end.py",
       "timeout": 10
     }]
   }
@@ -70,7 +70,7 @@ Add to `~/.codex/hooks.json` inside the `"hooks"` object:
   {
     "hooks": [{
       "type": "command",
-      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/session-start.py",
+      "command": "cd /path/to/ai-memory-compiler && uv run python hooks/session-start.py",
       "timeout": 15
     }]
   }
@@ -79,7 +79,7 @@ Add to `~/.codex/hooks.json` inside the `"hooks"` object:
   {
     "hooks": [{
       "type": "command",
-      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/codex-stop.py",
+      "command": "cd /path/to/ai-memory-compiler && uv run python hooks/codex-stop.py",
       "timeout": 10
     }]
   }
@@ -98,7 +98,7 @@ Gives Claude Code tools to search the knowledge base mid-session. Add to `~/.cla
   "mcpServers": {
     "knowledge-base": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/claude-memory-compiler", "python", "scripts/mcp_server.py"]
+      "args": ["run", "--directory", "/path/to/ai-memory-compiler", "python", "scripts/mcp_server.py"]
     }
   }
 }
@@ -131,7 +131,7 @@ uv run python scripts/import_session.py transcript.jsonl --agent codex  # manual
 
 ## What's Different from Upstream
 
-This fork adds on top of [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler):
+Added on top of the original [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler):
 
 - **Codex support** — automatic session capture via hooks, same as Claude Code
 - **MCP server** — search and read knowledge base articles from any session

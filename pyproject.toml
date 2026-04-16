@@ -1,7 +1,7 @@
 [project]
-name = "llm-personal-kb"
-version = "0.1.0"
-description = "Personal knowledge base compiled from AI conversations - inspired by Karpathy's LLM KB architecture"
+name = "ai-memory-compiler"
+version = "0.2.0"
+description = "Your AI conversations compile themselves into a searchable knowledge base. Works with Claude Code and Codex."
 requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.1.29",

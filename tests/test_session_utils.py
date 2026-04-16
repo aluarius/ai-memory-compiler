@@ -41,7 +41,7 @@ def test_parse_codex_transcript_extracts_metadata_and_messages() -> None:
     assert parsed.session_id == "rollout-abc123"
     assert parsed.provider == "openai"
     assert parsed.model == "gpt-5.4"
-    assert parsed.cwd == "/Users/exmac/Desktop/ideas/claude-memory-compiler"
+    assert parsed.cwd == "/Users/exmac/Desktop/ideas/ai-memory-compiler"
     assert parsed.source == "cli=codex,mode=interactive"
     assert "System guidance should not be imported." not in parsed.context
     assert "**User:** Can we reuse the same memory pipeline for Codex?" in parsed.context
