@@ -10,15 +10,84 @@ Anthropic has clarified that personal use of the Claude Agent SDK is covered und
 
 ## Quick Start
 
-Tell your AI coding agent:
+```bash
+git clone https://github.com/aluarius/claude-memory-compiler
+cd claude-memory-compiler
+uv sync
+```
 
-> "Clone https://github.com/aluarius/claude-memory-compiler into this project. Set up the Claude Code hooks so my conversations automatically get captured into daily logs, compiled into a knowledge base, and injected back into future sessions. Read the AGENTS.md for the full technical reference on how everything works."
+Then configure hooks for your agent(s) below.
 
-The agent will:
-1. Clone the repo and run `uv sync` to install dependencies
-2. Add hooks to your `~/.claude/settings.json` (global — captures all sessions)
-3. Register the MCP server in `~/.claude/.mcp.json` for knowledge base access
-4. The hooks activate automatically next time you open Claude Code
+### Claude Code Setup
+
+Add to `~/.claude/settings.json` inside the `"hooks"` object:
+
+```json
+"SessionStart": [
+  {
+    "matcher": "",
+    "hooks": [{
+      "type": "command",
+      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/session-start.py",
+      "timeout": 15
+    }]
+  }
+],
+"PreCompact": [
+  {
+    "matcher": "",
+    "hooks": [{
+      "type": "command",
+      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/pre-compact.py",
+      "timeout": 10
+    }]
+  }
+],
+"SessionEnd": [
+  {
+    "matcher": "",
+    "hooks": [{
+      "type": "command",
+      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/session-end.py",
+      "timeout": 10
+    }]
+  }
+]
+```
+
+This gives Claude Code:
+- **SessionStart** — injects the knowledge base index and recent daily log into every session
+- **SessionEnd** — captures the conversation and extracts knowledge into the daily log
+- **PreCompact** — safety net: captures context before auto-compaction discards it
+
+### Codex Setup
+
+Add to `~/.codex/hooks.json` inside the `"hooks"` object:
+
+```json
+"SessionStart": [
+  {
+    "hooks": [{
+      "type": "command",
+      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/session-start.py",
+      "timeout": 15
+    }]
+  }
+],
+"Stop": [
+  {
+    "hooks": [{
+      "type": "command",
+      "command": "cd /path/to/claude-memory-compiler && uv run python hooks/codex-stop.py",
+      "timeout": 10
+    }]
+  }
+]
+```
+
+This gives Codex:
+- **SessionStart** — same knowledge base injection as Claude Code
+- **Stop** — finds the latest transcript in `~/.codex/sessions/` and imports it into the daily log
 
 ## How It Works
 
@@ -87,33 +156,14 @@ Available tools:
 
 `read_article()` now validates paths and will refuse attempts to escape `knowledge/`.
 
-## Multi-Agent Support: Claude Code + Codex
+## Multi-Agent Support
 
-Both Claude Code and Codex sessions are captured automatically into the same knowledge base.
+Both Claude Code and Codex sessions are captured automatically into the same knowledge base (see setup above). All sessions are tagged with source metadata (`agent=... | provider=... | session=... | cwd=...`) so mixed-agent history stays auditable.
 
-- **Claude Code** — automatic capture via `SessionEnd` / `PreCompact` hooks in `~/.claude/settings.json`
-- **Codex** — automatic capture via `Stop` hook in `~/.codex/hooks.json`
-- **Other agents** — manual import with `scripts/import_session.py`
-
-All sessions are tagged with source metadata (`agent=... | provider=... | session=... | cwd=...`) so mixed-agent history stays auditable.
-
-### Codex Setup
-
-Add the hook to `~/.codex/hooks.json` (inside the `"Stop"` array):
-
-```json
-{
-  "type": "command",
-  "command": "cd /path/to/claude-memory-compiler && uv run python hooks/codex-stop.py",
-  "timeout": 10
-}
-```
-
-The hook finds the most recent Codex transcript (`~/.codex/sessions/`), parses it, and feeds it through the same flush pipeline. Manual import and the interactive wrapper also work:
+For other agents or manual import:
 
 ```bash
 uv run python scripts/import_session.py /path/to/transcript.jsonl --agent codex --provider openai
-uv run python scripts/codex_session.py -- -m gpt-5.4
 ```
 
 For the supported Codex transcript shape, see [docs/codex-transcripts.md](docs/codex-transcripts.md).
