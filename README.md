@@ -4,9 +4,11 @@
 
 **Your AI conversations compile themselves into a searchable knowledge base.**
 
-Adapted from [Karpathy's LLM Knowledge Base](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) architecture, but instead of clipping web articles, the raw data is your own AI conversations. Claude Code can feed it automatically via hooks, and other agents such as Codex can feed the same pipeline via transcript import. Sessions are normalized into daily logs, then compiled into structured, cross-referenced knowledge articles organized by concept. Retrieval uses a simple index file instead of RAG - no vector database, no embeddings, just markdown.
+Works with **Claude Code** and **Codex**. Sessions are captured automatically via hooks, important knowledge is extracted into daily logs, then compiled into structured, cross-referenced articles. At the start of every session your agent gets the knowledge base index — so it "remembers" what it learned before.
 
-Anthropic has clarified that personal use of the Claude Agent SDK is covered under your existing Claude subscription (Max, Team, or Enterprise) - no separate API credits needed.
+No vector database, no embeddings, no RAG — just markdown and an index the LLM reads directly. At personal scale (up to ~500 articles) this [outperforms vector similarity](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+
+Claude Agent SDK usage is covered by your Claude subscription (Max, Team, or Enterprise) — no extra API costs.
 
 ## Quick Start
 
@@ -16,9 +18,9 @@ cd claude-memory-compiler
 uv sync
 ```
 
-Then configure hooks for your agent(s) below.
+Then configure hooks for your agent(s).
 
-### Claude Code Setup
+### Claude Code
 
 Add to `~/.claude/settings.json` inside the `"hooks"` object:
 
@@ -55,12 +57,11 @@ Add to `~/.claude/settings.json` inside the `"hooks"` object:
 ]
 ```
 
-This gives Claude Code:
-- **SessionStart** — injects the knowledge base index and recent daily log into every session
-- **SessionEnd** — captures the conversation and extracts knowledge into the daily log
-- **PreCompact** — safety net: captures context before auto-compaction discards it
+- **SessionStart** — injects knowledge base index into every session
+- **SessionEnd** — captures the conversation and extracts knowledge
+- **PreCompact** — safety net before auto-compaction discards context
 
-### Codex Setup
+### Codex
 
 Add to `~/.codex/hooks.json` inside the `"hooks"` object:
 
@@ -85,57 +86,12 @@ Add to `~/.codex/hooks.json` inside the `"hooks"` object:
 ]
 ```
 
-This gives Codex:
 - **SessionStart** — same knowledge base injection as Claude Code
-- **Stop** — finds the latest transcript in `~/.codex/sessions/` and imports it into the daily log
+- **Stop** — auto-imports the latest transcript from `~/.codex/sessions/`
 
-## How It Works
+### MCP Server (optional)
 
-```
-Conversation -> SessionEnd/PreCompact hooks -> sanitize -> flush.py extracts knowledge
-    -> daily/YYYY-MM-DD.md -> compile.py -> knowledge/concepts/, connections/, qa/
-        -> lint (post-compile health check) -> archive old logs
-        -> SessionStart hook injects index into next session -> cycle repeats
-```
-
-- **Hooks** capture conversations automatically (session end + pre-compaction safety net)
-- **External session import** lets non-Claude agents feed the same memory pipeline (`scripts/import_session.py`)
-- **Sanitizer** redacts API keys, tokens, passwords before persisting to daily logs
-- **flush.py** decides what is worth saving via the configured processing runtime (`Claude` by default, optionally `Codex`), with retry logic for transient failures. Operational failures are written to `reports/runtime-events.md` instead of polluting the daily corpus. After 10 PM triggers end-of-day compilation automatically
-- **compile.py** turns daily logs into organized concept articles with cross-references, runs post-compile health checks, and archives old logs (30+ days)
-- **MCP server** exposes `search_knowledge`, `list_articles`, `read_article`, `search_daily_logs` tools — accessible from any Claude Code session
-- **query.py** answers questions using index-guided retrieval (no RAG needed at personal scale)
-- **lint.py** runs 7 health checks (broken links, orphans, contradictions, staleness)
-- **Per-task runtime switch** lets `flush`, `compile`, `query`, and contradiction lint run through `Claude` or `Codex` via `scripts/runtime-config.json`
-
-## Key Commands
-
-```bash
-uv run python scripts/compile.py                    # compile new daily logs
-uv run python scripts/compile.py --dry-run           # see what would be compiled
-uv run python scripts/query.py "question"            # ask the knowledge base
-uv run python scripts/query.py "question" --file-back # ask + save answer back
-uv run python scripts/lint.py                        # run health checks
-uv run python scripts/lint.py --structural-only      # free structural checks only
-uv run python scripts/import_session.py /path/to/transcript.jsonl --agent codex --provider openai
-```
-
-Runtime selection lives in `scripts/runtime-config.json`. Default is all `claude`.
-Example:
-
-```json
-{
-  "flush_runtime": "claude",
-  "compile_runtime": "claude",
-  "query_runtime": "codex",
-  "lint_runtime": "claude",
-  "codex_model": "gpt-5.4"
-}
-```
-
-## MCP Server
-
-The knowledge base is available as an MCP server for Claude Code. Register in `~/.claude/.mcp.json`:
+Gives Claude Code tools to search the knowledge base mid-session. Add to `~/.claude/.mcp.json`:
 
 ```json
 {
@@ -148,52 +104,41 @@ The knowledge base is available as an MCP server for Claude Code. Register in `~
 }
 ```
 
-Available tools:
-- `search_knowledge(query)` — search articles by keyword
-- `list_articles()` — list all articles with summaries
-- `read_article(path)` — read a specific article
-- `search_daily_logs(query, last_n_days)` — search recent session logs
+Tools: `search_knowledge`, `list_articles`, `read_article`, `search_daily_logs`.
 
-`read_article()` now validates paths and will refuse attempts to escape `knowledge/`.
+## How It Works
 
-## Multi-Agent Support
-
-Both Claude Code and Codex sessions are captured automatically into the same knowledge base (see setup above). All sessions are tagged with source metadata (`agent=... | provider=... | session=... | cwd=...`) so mixed-agent history stays auditable.
-
-For other agents or manual import:
-
-```bash
-uv run python scripts/import_session.py /path/to/transcript.jsonl --agent codex --provider openai
+```
+Session ends -> hook captures transcript -> sanitize secrets -> flush.py extracts knowledge
+  -> daily/YYYY-MM-DD.md -> compile.py -> knowledge/concepts/, connections/, qa/
+    -> next session starts -> hook injects knowledge index -> agent "remembers"
 ```
 
-For the supported Codex transcript shape, see [docs/codex-transcripts.md](docs/codex-transcripts.md).
+- **flush.py** — decides what's worth saving (runs after every session, retries on failures)
+- **compile.py** — compiles daily logs into structured wiki articles (auto-triggers after 10 PM)
+- **Sensitive data** (API keys, tokens, passwords) is redacted before anything is saved
+- **Old logs** are archived after 30 days
 
-## Security
+## Key Commands
 
-Sensitive data (API keys, tokens, passwords, private keys, connection strings) is automatically redacted before being written to daily logs. See `hooks/sanitize.py` for the full list of patterns.
-
-## Why No RAG?
-
-Karpathy's insight: at personal scale (50-500 articles), the LLM reading a structured `index.md` outperforms vector similarity. The LLM understands what you're really asking; cosine similarity just finds similar words. RAG becomes necessary at ~2,000+ articles when the index exceeds the context window.
+```bash
+uv run python scripts/compile.py                     # compile new daily logs
+uv run python scripts/compile.py --dry-run            # preview what would compile
+uv run python scripts/query.py "question"             # ask the knowledge base
+uv run python scripts/lint.py --structural-only       # health checks (free)
+uv run python scripts/import_session.py transcript.jsonl --agent codex  # manual import
+```
 
 ## What's Different from Upstream
 
-This fork adds the following on top of [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler):
+This fork adds on top of [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler):
 
-- **MCP server** — knowledge base accessible as tools from any Claude Code session (`search_knowledge`, `list_articles`, `read_article`, `search_daily_logs`)
-- **Sensitive data redaction** — API keys, tokens, passwords, private keys are automatically masked before writing to daily logs (`hooks/sanitize.py`)
-- **Retry with stderr capture** — flush.py retries on transient CLI failures and captures real stderr for diagnostics instead of the generic "Check stderr output for details"
-- **Post-compile health checks** — structural lint runs automatically after every compilation
-- **Log retention** — compiled daily logs older than 30 days are archived to `daily/archive/`
-- **Temp file cleanup** — orphaned context files from crashed flushes are cleaned up automatically
-- **Global hooks** — hooks configured in `~/.claude/settings.json` to capture sessions from all projects, not just this one
-- **Automatic Codex capture** — `Stop` hook for Codex auto-imports sessions into the same KB alongside Claude Code
-- **File locking** — concurrent flush/compile processes safely share state files and daily logs (`scripts/locking.py`)
-- **Shared session parsing** — hooks deduplicated into `scripts/session_utils.py` with normalized `SessionMetadata`
-- **Proper process detachment** — background flush/compile processes detach from hook session group on all platforms
-- **Path traversal prevention** — MCP `read_article()` validates paths and refuses escapes from `knowledge/`
-- **Test suite** — 18 tests covering transcript parsing, sanitization, config, locking, and utilities
+- **Codex support** — automatic session capture via hooks, same as Claude Code
+- **MCP server** — search and read knowledge base articles from any session
+- **Secret redaction** — API keys, tokens, passwords masked before saving
+- **Global hooks** — capture sessions from all projects, not just this one
+- **Reliability** — retry logic, file locking, proper process detachment, temp cleanup
 
 ## Technical Reference
 
-See **[AGENTS.md](AGENTS.md)** for the complete technical reference: article formats, hook architecture, script internals, cross-platform details, costs, and customization options.
+See **[AGENTS.md](AGENTS.md)** for the complete technical reference: article formats, hook architecture, script internals, and customization options.
