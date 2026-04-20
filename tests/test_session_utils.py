@@ -25,6 +25,23 @@ def test_parse_claude_transcript_extracts_recent_turns() -> None:
     assert "**Assistant:** Support manual transcript import first" in parsed.context
 
 
+def test_detect_transcript_format_skips_claude_cli_metadata_preamble() -> None:
+    transcript = FIXTURES_DIR / "claude-session-with-meta.jsonl"
+
+    assert detect_transcript_format(transcript) == "claude_jsonl"
+
+
+def test_parse_claude_transcript_ignores_metadata_preamble() -> None:
+    transcript = FIXTURES_DIR / "claude-session-with-meta.jsonl"
+
+    parsed = parse_transcript(transcript, max_turns=10, max_chars=2_000)
+
+    assert parsed.format == "claude_jsonl"
+    assert parsed.turn_count == 2
+    assert "**User:** How should we structure the compiler?" in parsed.context
+    assert "**Assistant:** Keep the scripts flat." in parsed.context
+
+
 def test_detect_transcript_format_for_codex_fixture() -> None:
     transcript = FIXTURES_DIR / "codex-session.jsonl"
 

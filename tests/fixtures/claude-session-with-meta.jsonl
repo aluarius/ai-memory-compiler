@@ -1,0 +1,7 @@
+{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"abc"}
+{"type":"attachment","sessionId":"abc"}
+{"type":"attachment","sessionId":"abc"}
+{"type":"queue-operation","sessionId":"abc"}
+{"message":{"role":"user","content":"How should we structure the compiler?"},"type":"user","sessionId":"abc"}
+{"message":{"role":"assistant","content":[{"type":"text","text":"Keep the scripts flat."}]},"type":"assistant","sessionId":"abc"}
+{"type":"last-prompt","lastPrompt":"How should we structure the compiler?","sessionId":"abc"}

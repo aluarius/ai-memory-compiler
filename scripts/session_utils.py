@@ -75,25 +75,43 @@ def _trim_context(turns: list[str], *, max_turns: int, max_chars: int) -> tuple[
     return context, len(recent)
 
 
+_FORMAT_PROBE_LINES = 50
+
+
 def detect_transcript_format(transcript_path: Path) -> str:
-    """Detect the transcript format from the first non-empty line."""
+    """Detect the transcript format by probing the first non-empty lines.
+
+    Newer Claude Code CLI versions prepend metadata entries (permission-mode,
+    attachment, queue-operation, last-prompt, ...) before the first real
+    message, so we scan up to _FORMAT_PROBE_LINES entries until we see a
+    decisive marker.
+    """
+    saw_json = False
     with open(transcript_path, encoding="utf-8") as f:
-        for line in f:
+        for i, line in enumerate(f):
+            if i >= _FORMAT_PROBE_LINES:
+                break
             line = line.strip()
             if not line:
                 continue
             try:
                 entry = json.loads(line)
             except json.JSONDecodeError:
-                return "text"
+                if not saw_json:
+                    return "text"
+                continue
+            saw_json = True
 
-            if isinstance(entry, dict):
-                if entry.get("type") == "session_meta" and isinstance(entry.get("payload"), dict):
-                    return "codex_jsonl"
-                if "message" in entry or entry.get("role") in {"user", "assistant"}:
-                    return "claude_jsonl"
-                return "jsonl"
+            if not isinstance(entry, dict):
+                continue
 
+            if entry.get("type") == "session_meta" and isinstance(entry.get("payload"), dict):
+                return "codex_jsonl"
+            if "message" in entry or entry.get("role") in {"user", "assistant"}:
+                return "claude_jsonl"
+
+    if saw_json:
+        return "jsonl"
     return "empty"
 
 
