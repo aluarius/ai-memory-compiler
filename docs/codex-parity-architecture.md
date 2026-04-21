@@ -18,21 +18,19 @@ What already exists:
 
 - `Claude Code` sessions are captured automatically via hooks
 - `Codex` sessions can be imported manually through [scripts/import_session.py](../scripts/import_session.py)
+- `Codex` now has documented experimental hooks via `hooks.json`
 - session metadata is already normalized enough for mixed-agent history in [scripts/session_utils.py](../scripts/session_utils.py)
 - per-task processing runtime can now be selected in `scripts/runtime-config.json`
 - Claude remains the default processing backend
 
 What does **not** exist today:
 
-- confirmed Codex hooks
-- confirmed Codex transcript storage contract
-- confirmed Codex lifecycle events we can rely on
 - a second processing provider actually wired into the project
 
 That means the project is currently at:
 
 - `Claude = full runtime`
-- `Codex = manual source import`
+- `Codex = manual import + lightweight hook capture`
 
 That is a useful state already. It does not need an enterprise architecture to be valid.
 
@@ -43,7 +41,6 @@ Do not build these yet:
 - `capture/`, `providers/`, `pipeline/`, `models/`, `orchestration/` trees
 - base classes for hypothetical runtimes
 - provider abstraction before the simple runtime switch stops being enough
-- automatic Codex capture built on guessed APIs
 - OpenAI processing backend for `flush` / `compile` / `query`
 
 Each of those adds complexity before there is evidence the project needs it.
@@ -73,17 +70,15 @@ In other words:
 - keep Claude as the default processing backend
 - treat Codex as an additional input source, not as a reason to redesign the app
 
-## What Must Be Researched First
+## What Is Now Known
 
-Before any further Codex work, answer these questions with real examples:
+The repo no longer needs to guess the basic Codex integration surface:
 
-1. What transcript format does Codex actually produce?
-2. Where are those transcripts stored?
-3. Are the paths stable enough to automate against?
-4. Are there any lifecycle hooks or events at all?
-5. If there are no hooks, what is the least ugly wrapper-based workflow?
+1. Codex writes JSONL transcripts under `~/.codex/sessions/...`.
+2. The `Stop` hook passes `transcript_path`, `session_id`, `cwd`, `model`, and `turn_id` on stdin.
+3. Hooks are still experimental and require `[features] codex_hooks = true`.
 
-Without those answers, any "automatic Codex capture" plan is speculation.
+The remaining work is hardening around those contracts, not inventing a new architecture.
 
 ## Cost Reality
 
@@ -121,19 +116,13 @@ The supported processing switch is:
 - choose `claude` or `codex` per task
 - keep `claude` as the default unless there is a specific reason to switch
 
-### Step 1: Research Codex Transcript Reality
+### Step 1: Keep The Integration Aligned With The Real Contract
 
-Collect a few real Codex session artifacts and answer:
+Keep validating against real Codex releases:
 
-- format
-- location
-- stability
-- metadata availability
-
-Deliverable:
-
-- one short markdown note with examples
-- two or three fixture transcripts under `tests/fixtures/` if the format is stable enough
+- transcript format
+- hook stdin payload
+- any lifecycle changes that affect `Stop`
 
 ### Step 2: Harden Manual Import
 
@@ -145,16 +134,13 @@ If Codex transcript format differs from Claude JSONL:
 
 Do not create a framework for this. A simple `if agent == "codex"` branch is fine until proven otherwise.
 
-### Step 3: Decide Whether Automation Is Even Worth It
+### Step 3: Keep Automation Small
 
-Only after Step 1:
+Use the documented `Stop` hook for capture, but keep the implementation narrow:
 
-- if Codex exposes stable hooks or stable transcript lifecycle -> automate capture
-- if not -> keep manual import or build a tiny wrapper command
-
-The rule is simple:
-
-- no stable integration surface, no automation work
+- prefer the official stdin payload over scanning `~/.codex/sessions/`
+- keep transcript scanning only as legacy fallback
+- dedupe by `turn_id` or transcript change, because `Stop` is turn-scoped, not session-end
 
 ### Step 4: Revisit Bigger Architecture Only If Needed
 
@@ -172,7 +158,7 @@ These are worth doing in the near term:
 
 - document the supported Codex import workflow more explicitly
 - add transcript fixtures once real Codex examples exist
-- add a Codex-specific parser branch only if the format differs
+- keep the Stop-hook implementation aligned with the official payload contract
 - keep writing source metadata into daily logs
 
 These are **not** worth doing yet:
@@ -209,7 +195,6 @@ It does **not** need to mean:
 
 Re-open the bigger architecture discussion only if one of these becomes true:
 
-- Codex gets stable hooks
 - Codex transcript automation becomes trivial and reliable
 - the KB grows enough that the current scripts become painful
 - OpenAI-backed processing shows a concrete advantage worth paying for

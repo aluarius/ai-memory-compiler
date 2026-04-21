@@ -10,6 +10,22 @@ This project now supports direct import of the JSONL session format currently wr
 
 These paths were observed locally and are treated as implementation details, not a guaranteed public API.
 
+## Hook Contract
+
+The documented Codex `Stop` hook now passes the active transcript path on stdin.
+The fields this project currently relies on are:
+
+- `transcript_path`
+- `session_id`
+- `cwd`
+- `model`
+- `turn_id`
+- `stop_hook_active`
+
+That means the hook should import the specific transcript Codex names for the
+current turn, and use directory scanning only as a compatibility fallback for
+older CLI builds.
+
 ## Supported JSONL Shape
 
 The importer reads the current Codex session shape conservatively:

@@ -10,6 +10,7 @@ scripts/flush.log
 scripts/compile.log
 scripts/.locks/
 scripts/.last-codex-import
+scripts/.last-codex-import.json
 scripts/session-flush-*
 scripts/flush-context-*
 

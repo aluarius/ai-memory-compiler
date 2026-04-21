@@ -22,7 +22,9 @@ Then configure hooks for your agent(s).
 
 ### Claude Code
 
-Add to `~/.claude/settings.json` inside the `"hooks"` object:
+File: `~/.claude/settings.json`
+
+Add these entries inside the top-level `"hooks"` object:
 
 ```json
 "SessionStart": [
@@ -63,31 +65,56 @@ Add to `~/.claude/settings.json` inside the `"hooks"` object:
 
 ### Codex
 
-Add to `~/.codex/hooks.json` inside the `"hooks"` object:
+Codex hooks are documented now, but they are still experimental and disabled by
+default.
+
+File 1: `~/.codex/config.toml`
+
+Enable the feature flag:
+
+```toml
+[features]
+codex_hooks = true
+```
+
+File 2: `~/.codex/hooks.json`
+
+Add the hook configuration there. You can also use `<repo>/.codex/hooks.json`
+for repo-local hooks, but this project's recommended setup is the global file:
 
 ```json
-"SessionStart": [
-  {
-    "hooks": [{
-      "type": "command",
-      "command": "cd /path/to/ai-memory-compiler && uv run python hooks/session-start.py",
-      "timeout": 15
-    }]
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [{
+          "type": "command",
+          "command": "cd /path/to/ai-memory-compiler && uv run python hooks/session-start.py",
+          "timeout": 15
+        }]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{
+          "type": "command",
+          "command": "cd /path/to/ai-memory-compiler && uv run python hooks/codex-stop.py",
+          "timeout": 10
+        }]
+      }
+    ]
   }
-],
-"Stop": [
-  {
-    "hooks": [{
-      "type": "command",
-      "command": "cd /path/to/ai-memory-compiler && uv run python hooks/codex-stop.py",
-      "timeout": 10
-    }]
-  }
-]
+}
 ```
 
 - **SessionStart** — same knowledge base injection as Claude Code
-- **Stop** — auto-imports the latest transcript from `~/.codex/sessions/`
+- **Stop** — turn-scoped auto-import using Codex's official `transcript_path`
+  hook payload; falls back to transcript scanning only for older builds
+- Codex does not currently provide a true session-end hook equivalent to
+  Claude Code's `SessionEnd`
+- If you define the same hook in both `~/.codex/hooks.json` and
+  `<repo>/.codex/hooks.json`, Codex runs both
 
 ### MCP Server (optional)
 
@@ -133,7 +160,10 @@ uv run python scripts/import_session.py transcript.jsonl --agent codex  # manual
 
 Added on top of the original [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler):
 
-- **Codex support** — automatic session capture via hooks, same as Claude Code
+- **Codex support** — automatic capture via documented Codex hooks, with
+  turn-scoped `Stop` behavior instead of Claude Code's `SessionEnd`
+- **Official Codex hook support** — uses documented `hooks.json` payloads for
+  `SessionStart` and `Stop`
 - **MCP server** — search and read knowledge base articles from any session
 - **Secret redaction** — API keys, tokens, passwords masked before saving
 - **Global hooks** — capture sessions from all projects, not just this one
