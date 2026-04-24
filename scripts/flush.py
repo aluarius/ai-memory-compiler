@@ -59,6 +59,13 @@ COMPILE_AFTER_HOUR = 22  # 10 PM local time
 TEMP_MAX_AGE = 3600  # 1 hour
 DEDUP_WINDOW_SECONDS = 120
 MAX_RECENT_FLUSHES = 64
+ALLOWED_FLUSH_HEADINGS = (
+    "**Context:**",
+    "**Key Exchanges:**",
+    "**Decisions Made:**",
+    "**Lessons Learned:**",
+    "**Action Items:**",
+)
 
 
 def load_flush_state() -> dict:
@@ -144,6 +151,36 @@ def append_to_daily_log(content: str, metadata: SessionMetadata, section: str = 
             f.write(entry)
 
 
+def clean_flush_response(content: str) -> str:
+    """Drop transcript scaffolding and keep only the structured daily-log sections."""
+    stripped = content.strip()
+    if stripped == "FLUSH_OK" or stripped.startswith("FLUSH_ERROR"):
+        return stripped
+
+    cleaned: list[str] = []
+    in_section = False
+
+    for line in stripped.splitlines():
+        current = line.rstrip()
+        if any(current.startswith(prefix) for prefix in ALLOWED_FLUSH_HEADINGS):
+            in_section = True
+            cleaned.append(current)
+            continue
+        if not current:
+            if cleaned and cleaned[-1] != "":
+                cleaned.append("")
+            continue
+        if in_section and (current.startswith("- ") or current.startswith("  - ") or current.startswith("\t- ")):
+            cleaned.append(current)
+
+    while cleaned and not cleaned[0]:
+        cleaned.pop(0)
+    while cleaned and not cleaned[-1]:
+        cleaned.pop()
+
+    return "\n".join(cleaned).strip() or "FLUSH_OK"
+
+
 def build_flush_prompt(context: str) -> str:
     return f"""Review the conversation context below and respond with a concise summary
 of important items that should be preserved in the daily log.
@@ -169,6 +206,7 @@ Skip anything that is:
 - Routine tool calls or file reads
 - Content that's trivial or obvious
 - Trivial back-and-forth or clarification exchanges
+- Transcript scaffolding, assistant narration, or meta lines like "Attempting to read..." / "I'll check..."
 
 Only include sections that have actual content. If nothing is worth saving,
 respond with exactly: FLUSH_OK
@@ -242,15 +280,16 @@ async def run_flush(context: str) -> str:
         logging.info("Flush runtime: %s", runtime)
 
         if runtime == "codex":
-            return await asyncio.to_thread(
+            response = await asyncio.to_thread(
                 run_codex_prompt,
                 prompt,
                 cwd=ROOT,
                 allow_edits=False,
                 model=get_codex_model(),
             )
+            return clean_flush_response(response)
 
-        return await run_flush_claude(prompt)
+        return clean_flush_response(await run_flush_claude(prompt))
     except Exception as e:
         logging.exception("Flush runtime failed")
         return f"FLUSH_ERROR: {type(e).__name__}: {e}"

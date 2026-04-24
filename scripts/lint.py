@@ -23,6 +23,8 @@ from utils import (
     daily_source_exists,
     extract_wikilinks,
     file_hash,
+    find_missing_index_targets,
+    find_unindexed_articles,
     get_article_word_count,
     list_raw_files,
     list_wiki_articles,
@@ -58,6 +60,29 @@ def check_broken_links() -> list[dict]:
                     "file": str(rel),
                     "detail": f"Broken link: [[{link}]] - target does not exist",
                 })
+    return issues
+
+
+def check_index_consistency() -> list[dict]:
+    """Check that every article on disk is reachable from knowledge/index.md."""
+    issues = []
+
+    for link in find_unindexed_articles():
+        issues.append({
+            "severity": "error",
+            "check": "index_consistency",
+            "file": f"{link}.md",
+            "detail": f"Article exists on disk but is missing from knowledge/index.md: [[{link}]]",
+        })
+
+    for link in find_missing_index_targets():
+        issues.append({
+            "severity": "error",
+            "check": "index_consistency",
+            "file": "index.md",
+            "detail": f"knowledge/index.md references missing article: [[{link}]]",
+        })
+
     return issues
 
 
@@ -128,7 +153,7 @@ def check_missing_backlinks() -> list[dict]:
             target_path = KNOWLEDGE_DIR / f"{link}.md"
             if target_path.exists():
                 target_content = target_path.read_text(encoding="utf-8")
-                if f"[[{source_link}]]" not in target_content:
+                if source_link not in extract_wikilinks(target_content):
                     issues.append({
                         "severity": "suggestion",
                         "check": "missing_backlink",
@@ -282,6 +307,7 @@ def main():
     # Structural checks (free, instant)
     checks = [
         ("Broken links", check_broken_links),
+        ("Index consistency", check_index_consistency),
         ("Orphan pages", check_orphan_pages),
         ("Orphan sources", check_orphan_sources),
         ("Stale articles", check_stale_articles),

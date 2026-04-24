@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -73,9 +74,17 @@ def slugify(text: str) -> str:
 
 # ── Wikilink helpers ──────────────────────────────────────────────────
 
+def strip_markdown_code(content: str) -> str:
+    """Remove fenced and inline code spans before structural markdown parsing."""
+    content = re.sub(r"```[\s\S]*?```", "", content)
+    content = re.sub(r"~~~[\s\S]*?~~~", "", content)
+    content = re.sub(r"`[^`\n]*`", "", content)
+    return content
+
+
 def extract_wikilinks(content: str) -> list[str]:
     """Extract all [[wikilinks]] from markdown content."""
-    return re.findall(r"\[\[([^\]]+)\]\]", content)
+    return re.findall(r"\[\[([^\]]+)\]\]", strip_markdown_code(content))
 
 
 def wiki_article_exists(link: str) -> bool:
@@ -133,6 +142,13 @@ def read_wiki_index() -> str:
     return "# Knowledge Base Index\n\n| Article | Summary | Compiled From | Updated |\n|---------|---------|---------------|---------|"
 
 
+def list_indexed_articles(index_content: str | None = None) -> set[str]:
+    """Return all article paths referenced from knowledge/index.md."""
+    if index_content is None:
+        index_content = read_wiki_index()
+    return {match.strip() for match in re.findall(r"\[\[([^\]]+)\]\]", index_content)}
+
+
 def read_all_wiki_content() -> str:
     """Read index + all wiki articles into a single string for context."""
     parts = [f"## INDEX\n\n{read_wiki_index()}"]
@@ -157,6 +173,28 @@ def list_wiki_articles() -> list[Path]:
     return articles
 
 
+def find_unindexed_articles() -> list[str]:
+    """List article paths present on disk but missing from knowledge/index.md."""
+    indexed = list_indexed_articles()
+    missing = []
+    for article in list_wiki_articles():
+        rel = str(article.relative_to(KNOWLEDGE_DIR)).replace(".md", "").replace("\\", "/")
+        if rel not in indexed:
+            missing.append(rel)
+    return missing
+
+
+def find_missing_index_targets() -> list[str]:
+    """List index entries that point to missing article files."""
+    missing = []
+    for link in sorted(list_indexed_articles()):
+        if not link.startswith(("concepts/", "connections/", "qa/")):
+            continue
+        if not (KNOWLEDGE_DIR / f"{link}.md").exists():
+            missing.append(link)
+    return missing
+
+
 def list_raw_files() -> list[Path]:
     """List all daily log files."""
     if not DAILY_DIR.exists():
@@ -173,7 +211,7 @@ def count_inbound_links(target: str, exclude_file: Path | None = None) -> int:
         if article == exclude_file:
             continue
         content = article.read_text(encoding="utf-8")
-        if f"[[{target}]]" in content:
+        if target in extract_wikilinks(content):
             count += 1
     return count
 
@@ -193,3 +231,42 @@ def build_index_entry(rel_path: str, summary: str, sources: str, updated: str) -
     """Build a single index table row."""
     link = rel_path.replace(".md", "")
     return f"| [[{link}]] | {summary} | {sources} | {updated} |"
+
+
+# ── Build log helpers ─────────────────────────────────────────────────
+
+def normalize_build_log(content: str) -> str:
+    """Sort build log entries chronologically while preserving the header block."""
+    pattern = re.compile(r"^## \[([^\]]+)\].*?(?=^## \[|\Z)", re.MULTILINE | re.DOTALL)
+    matches = list(pattern.finditer(content))
+    if not matches:
+        return content
+
+    preamble = content[:matches[0].start()].rstrip()
+    entries: list[tuple[datetime, int, str]] = []
+
+    for idx, match in enumerate(matches):
+        timestamp = datetime.fromisoformat(match.group(1))
+        block = match.group(0).rstrip()
+        entries.append((timestamp, idx, block))
+
+    entries.sort(key=lambda item: (item[0], item[1]))
+    ordered_blocks = "\n\n".join(block for _, _, block in entries)
+
+    if preamble:
+        return f"{preamble}\n\n{ordered_blocks}\n"
+    return f"{ordered_blocks}\n"
+
+
+def normalize_build_log_file(path: Path = LOG_FILE) -> bool:
+    """Normalize knowledge/log.md in place if entries are out of order."""
+    if not path.exists():
+        return False
+
+    original = path.read_text(encoding="utf-8")
+    normalized = normalize_build_log(original)
+    if normalized == original:
+        return False
+
+    path.write_text(normalized, encoding="utf-8")
+    return True

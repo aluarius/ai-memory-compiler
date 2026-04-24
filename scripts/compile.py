@@ -36,6 +36,7 @@ from utils import (
     list_raw_files,
     list_wiki_articles,
     load_state,
+    normalize_build_log_file,
     read_wiki_index,
     update_state,
 )
@@ -185,6 +186,8 @@ Read the daily log above and compile it into wiki articles following the schema 
     if current_hash != compiled_hash:
         print("  Notice: source log changed during compile; it will be recompiled on the next run.")
 
+    normalize_build_log_file()
+
     return cost
 
 
@@ -252,6 +255,7 @@ def run_post_compile_lint() -> None:
     """Run structural lint checks after compilation."""
     from lint import (
         check_broken_links,
+        check_index_consistency,
         check_orphan_pages,
         check_sparse_articles,
         check_stale_articles,
@@ -261,6 +265,7 @@ def run_post_compile_lint() -> None:
     issues = []
     for name, fn in [
         ("Broken links", check_broken_links),
+        ("Index consistency", check_index_consistency),
         ("Orphan pages", check_orphan_pages),
         ("Sparse articles", check_sparse_articles),
         ("Stale articles", check_stale_articles),

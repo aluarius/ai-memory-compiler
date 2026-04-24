@@ -17,3 +17,18 @@ def test_run_flush_returns_flush_error_when_codex_runtime_fails(monkeypatch) -> 
     result = asyncio.run(flush.run_flush("context"))
 
     assert result == "FLUSH_ERROR: RuntimeError: codex unavailable"
+
+
+def test_clean_flush_response_strips_transcript_scaffolding() -> None:
+    content = """Attempting to read the plan for the full review context:
+
+**Context:** Project work
+
+**Key Exchanges:**
+- Found a bug
+"""
+
+    assert flush.clean_flush_response(content) == """**Context:** Project work
+
+**Key Exchanges:**
+- Found a bug"""
