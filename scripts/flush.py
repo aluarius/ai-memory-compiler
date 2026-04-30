@@ -139,7 +139,7 @@ def append_to_daily_log(content: str, metadata: SessionMetadata, section: str = 
     with file_lock(DAILY_LOG_LOCK_FILE):
         if not log_path.exists():
             log_path.write_text(
-                f"# Daily Log: {today.strftime('%Y-%m-%d')}\n\n## Sessions\n\n## Memory Maintenance\n\n",
+                f"# Daily Log: {today.strftime('%Y-%m-%d')}\n\n## Sessions\n\n",
                 encoding="utf-8",
             )
 

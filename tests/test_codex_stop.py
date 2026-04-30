@@ -107,3 +107,20 @@ def test_claim_import_key_is_deduplicated(tmp_path: Path) -> None:
 
     assert codex_stop.claim_import_key("session:a:turn:b") is True
     assert codex_stop.claim_import_key("session:a:turn:b") is False
+
+
+def test_claim_import_key_rate_limits_same_session(tmp_path: Path, monkeypatch) -> None:
+    codex_stop = load_codex_stop_module()
+    codex_stop.DEDUP_FILE = tmp_path / ".last-codex-import.json"
+    codex_stop.DEDUP_LOCK_FILE = tmp_path / ".locks" / "codex-stop.lock"
+    codex_stop.MIN_SESSION_IMPORT_INTERVAL = 60
+
+    monkeypatch.setattr(codex_stop.time, "time", lambda: 1_000)
+
+    assert codex_stop.claim_import_key("session:a:turn:1", session_id="a") is True
+    assert codex_stop.claim_import_key("session:a:turn:2", session_id="a") is False
+    assert codex_stop.claim_import_key("session:b:turn:1", session_id="b") is True
+
+    monkeypatch.setattr(codex_stop.time, "time", lambda: 1_061)
+
+    assert codex_stop.claim_import_key("session:a:turn:3", session_id="a") is True

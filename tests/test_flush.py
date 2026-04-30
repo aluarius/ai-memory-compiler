@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import flush
 
@@ -32,3 +33,23 @@ def test_clean_flush_response_strips_transcript_scaffolding() -> None:
 
 **Key Exchanges:**
 - Found a bug"""
+
+
+def test_append_to_daily_log_creates_sessions_only_skeleton(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(flush, "DAILY_DIR", tmp_path)
+    monkeypatch.setattr(flush, "DAILY_LOG_LOCK_FILE", tmp_path / ".daily.lock")
+
+    metadata = flush.SessionMetadata(
+        session_id="session-1",
+        agent="codex",
+        provider="openai",
+    )
+
+    flush.append_to_daily_log("**Context:** Saved item", metadata)
+
+    daily_logs = list(tmp_path.glob("*.md"))
+    assert len(daily_logs) == 1
+    content = daily_logs[0].read_text(encoding="utf-8")
+    assert content.startswith("# Daily Log:")
+    assert "\n## Sessions\n\n### Session" in content
+    assert "## Memory Maintenance" not in content

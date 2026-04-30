@@ -37,6 +37,7 @@ DEDUP_LOCK_FILE = SCRIPTS_DIR / ".locks" / "codex-stop.lock"
 # back to filesystem scanning.
 MAX_AGE = 120
 DEDUP_WINDOW = 3600
+MIN_SESSION_IMPORT_INTERVAL = 10 * 60
 MAX_RECENT_IMPORTS = 128
 
 
@@ -104,7 +105,7 @@ def build_import_key(
     return f"path:{transcript}:mtime:{transcript_mtime_ns}"
 
 
-def claim_import_key(import_key: str) -> bool:
+def claim_import_key(import_key: str, *, session_id: str | None = None) -> bool:
     """Atomically reserve an import key, returning False if it was already seen."""
     now = time.time()
     with file_lock(DEDUP_LOCK_FILE):
@@ -116,7 +117,23 @@ def claim_import_key(import_key: str) -> bool:
         if any(item.get("key") == import_key for item in recent):
             return False
 
-        recent.append({"key": import_key, "timestamp": now})
+        if session_id:
+            latest_session_import = max(
+                (
+                    float(item.get("timestamp", 0))
+                    for item in recent
+                    if item.get("session_id") == session_id
+                ),
+                default=0,
+            )
+            if now - latest_session_import < MIN_SESSION_IMPORT_INTERVAL:
+                return False
+
+        item = {"key": import_key, "timestamp": now}
+        if session_id:
+            item["session_id"] = session_id
+
+        recent.append(item)
         save_recent_imports(recent[-MAX_RECENT_IMPORTS:])
         return True
 
@@ -260,7 +277,7 @@ def main() -> None:
         transcript_mtime_ns=_transcript_mtime_ns(transcript),
     )
 
-    if not claim_import_key(import_key):
+    if not claim_import_key(import_key, session_id=meta.get("session_id") or None):
         return
 
     cmd = build_import_command(transcript, meta)

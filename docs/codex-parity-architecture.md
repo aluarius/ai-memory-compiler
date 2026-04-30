@@ -141,6 +141,8 @@ Use the documented `Stop` hook for capture, but keep the implementation narrow:
 - prefer the official stdin payload over scanning `~/.codex/sessions/`
 - keep transcript scanning only as legacy fallback
 - dedupe by `turn_id` or transcript change, because `Stop` is turn-scoped, not session-end
+- rate-limit automatic imports per session so one active Codex thread does not
+  produce repetitive rolling summaries every few minutes
 
 ### Step 4: Revisit Bigger Architecture Only If Needed
 

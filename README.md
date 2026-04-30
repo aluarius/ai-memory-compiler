@@ -110,7 +110,8 @@ for repo-local hooks, but this project's recommended setup is the global file:
 
 - **SessionStart** — same knowledge base injection as Claude Code
 - **Stop** — turn-scoped auto-import using Codex's official `transcript_path`
-  hook payload; falls back to transcript scanning only for older builds
+  hook payload; rate-limited per session to avoid repetitive rolling summaries,
+  and falls back to transcript scanning only for older builds
 - Codex does not currently provide a true session-end hook equivalent to
   Claude Code's `SessionEnd`
 - If you define the same hook in both `~/.codex/hooks.json` and
