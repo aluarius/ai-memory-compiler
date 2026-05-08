@@ -30,7 +30,7 @@ def build_codex_command(
     ]
 
     if allow_edits:
-        cmd.append("--full-auto")
+        cmd.extend(["--sandbox", "workspace-write"])
     else:
         cmd.extend(["-s", "read-only"])
 

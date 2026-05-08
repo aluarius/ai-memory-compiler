@@ -74,7 +74,7 @@ Enable the feature flag:
 
 ```toml
 [features]
-codex_hooks = true
+hooks = true
 ```
 
 File 2: `~/.codex/hooks.json`

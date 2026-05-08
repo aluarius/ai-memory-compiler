@@ -54,6 +54,7 @@ def test_build_codex_command_uses_expected_mode() -> None:
     )
 
     assert cmd[:2] == ["codex", "exec"]
-    assert "--full-auto" in cmd
+    assert "--sandbox" in cmd
+    assert "workspace-write" in cmd
     assert "-m" in cmd
     assert cmd[-1] == "Hello"

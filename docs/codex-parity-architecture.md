@@ -76,7 +76,7 @@ The repo no longer needs to guess the basic Codex integration surface:
 
 1. Codex writes JSONL transcripts under `~/.codex/sessions/...`.
 2. The `Stop` hook passes `transcript_path`, `session_id`, `cwd`, `model`, and `turn_id` on stdin.
-3. Hooks are still experimental and require `[features] codex_hooks = true`.
+3. Hooks are available through the Codex feature flag `[features] hooks = true`.
 
 The remaining work is hardening around those contracts, not inventing a new architecture.
 
