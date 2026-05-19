@@ -93,9 +93,14 @@ Read the daily log above and compile it into wiki articles following the schema 
 4. **Update existing articles** if this log adds new information to concepts already in the wiki
    - Read the existing article, add the new information, add the source to frontmatter
    - Use the index below to decide which existing articles to open with tools before editing
-5. **Update knowledge/index.md** - Add new entries to the table
+5. **Maintain graph connectivity**
+   - For each new article, add 1-3 meaningful Related Concepts links to existing hub articles
+   - When a new article is important but likely to be hard to discover, add one meaningful incoming link from an existing hub article
+   - Prefer domain hubs (methodology, deployment, Nuxt, SQLAlchemy, legacy combat, finance, GIS) over mechanical backlink symmetry
+   - Do not add links only to reduce lint counts; every link must help a future reader navigate context
+6. **Update knowledge/index.md** - Add new entries to the table
    - Each entry: `| [[path/slug]] | One-line summary | source-file | {timestamp[:10]} |`
-6. **Append to knowledge/log.md** - Add a timestamped entry:
+7. **Append to knowledge/log.md** - Add a timestamped entry:
    ```
    ## [{timestamp}] compile | {log_path.name}
    - Source: daily/{log_path.name}
@@ -113,6 +118,7 @@ Read the daily log above and compile it into wiki articles following the schema 
 - Every article must have complete YAML frontmatter
 - Use `[[wikilinks]]` only when the relationship is genuinely meaningful
 - Prefer 0-3 strong related links over invented cross-topic links
+- New durable concepts should not remain graph islands: make them reachable from at least one existing article when there is a true semantic parent
 - Key Points section should have 3-5 bullet points
 - Details section should have 2+ paragraphs
 - Related Concepts can be short if the topic is genuinely narrow
@@ -259,6 +265,7 @@ def run_post_compile_lint() -> None:
         check_orphan_pages,
         check_sparse_articles,
         check_stale_articles,
+        check_weak_connectivity,
     )
 
     print("\nRunning post-compile health checks...")
@@ -268,6 +275,7 @@ def run_post_compile_lint() -> None:
         ("Index consistency", check_index_consistency),
         ("Orphan pages", check_orphan_pages),
         ("Sparse articles", check_sparse_articles),
+        ("Weak connectivity", check_weak_connectivity),
         ("Stale articles", check_stale_articles),
     ]:
         found = fn()

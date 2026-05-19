@@ -2,7 +2,8 @@
 Lint the knowledge base for structural and semantic health.
 
 Runs 7 checks: broken links, orphan pages, orphan sources, stale articles,
-contradictions (LLM), missing backlinks, and sparse articles.
+contradictions (LLM), missing backlinks, sparse articles, and weak graph
+connectivity.
 
 Usage:
     uv run python lint.py                    # all checks
@@ -180,6 +181,52 @@ def check_sparse_articles() -> list[dict]:
     return issues
 
 
+def check_weak_connectivity(
+    max_issues: int = 25,
+    min_inbound_links: int = 2,
+    min_total_links: int = 4,
+) -> list[dict]:
+    """Identify articles that are reachable but weakly connected to the graph."""
+    articles = list_wiki_articles()
+    article_links = {
+        str(article.relative_to(KNOWLEDGE_DIR)).replace(".md", "").replace("\\", "/")
+        for article in articles
+    }
+    outbound: dict[str, set[str]] = {link: set() for link in article_links}
+    inbound: dict[str, set[str]] = {link: set() for link in article_links}
+
+    for article in articles:
+        source = str(article.relative_to(KNOWLEDGE_DIR)).replace(".md", "").replace("\\", "/")
+        for target in extract_wikilinks(article.read_text(encoding="utf-8")):
+            if target in article_links:
+                outbound[source].add(target)
+                inbound[target].add(source)
+
+    candidates = []
+    for link in sorted(article_links):
+        inbound_count = len(inbound[link])
+        outbound_count = len(outbound[link])
+        total_count = inbound_count + outbound_count
+        if inbound_count < min_inbound_links or total_count < min_total_links:
+            candidates.append((inbound_count, total_count, outbound_count, link))
+
+    candidates.sort(key=lambda item: (item[0], item[1], item[3]))
+
+    issues = []
+    for inbound_count, total_count, outbound_count, link in candidates[:max_issues]:
+        issues.append({
+            "severity": "suggestion",
+            "check": "weak_connectivity",
+            "file": f"{link}.md",
+            "detail": (
+                f"Weak graph connectivity: {inbound_count} inbound, "
+                f"{outbound_count} outbound. Add 1-3 semantic Related Concepts links "
+                "from/to relevant hub articles if the relationship is real."
+            ),
+        })
+    return issues
+
+
 async def check_contradictions() -> list[dict]:
     """Use LLM to detect contradictions across articles."""
     wiki_content = read_all_wiki_content()
@@ -313,6 +360,7 @@ def main():
         ("Stale articles", check_stale_articles),
         ("Missing backlinks", check_missing_backlinks),
         ("Sparse articles", check_sparse_articles),
+        ("Weak connectivity", check_weak_connectivity),
     ]
 
     for name, check_fn in checks:
