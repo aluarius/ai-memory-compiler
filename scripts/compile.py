@@ -45,10 +45,10 @@ from utils import (
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
-async def compile_daily_log(log_path: Path) -> float:
+async def compile_daily_log(log_path: Path) -> float | None:
     """Compile a single daily log into knowledge articles.
 
-    Returns the API cost of the compilation.
+    Returns the API cost of the compilation, or None if the compiler runtime failed.
     """
     with file_lock(DAILY_LOG_LOCK_FILE):
         log_content = log_path.read_text(encoding="utf-8")
@@ -141,7 +141,7 @@ Read the daily log above and compile it into wiki articles following the schema 
             )
         except Exception as e:
             print(f"  Error: {e}")
-            return 0.0
+            return None
     else:
         from claude_agent_sdk import (
             AssistantMessage,
@@ -171,7 +171,7 @@ Read the daily log above and compile it into wiki articles following the schema 
                     print(f"  Cost: ${cost:.4f}")
         except Exception as e:
             print(f"  Error: {e}")
-            return 0.0
+            return None
 
     # Update state
     rel_path = log_path.name
@@ -243,22 +243,40 @@ def main():
             return
 
         total_cost = 0.0
+        failed_logs: list[str] = []
         for i, log_path in enumerate(to_compile, 1):
             print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
             cost = asyncio.run(compile_daily_log(log_path))
+            if cost is None:
+                failed_logs.append(log_path.name)
+                print("  Failed.")
+                break
             total_cost += cost
             print("  Done.")
 
         articles = list_wiki_articles()
-        print(f"\nCompilation complete. Total cost: ${total_cost:.2f}")
+        completion_status = "failed" if failed_logs else "complete"
+        print(f"\nCompilation {completion_status}. Total cost: ${total_cost:.2f}")
         print(f"Knowledge base: {len(articles)} articles")
 
-        run_post_compile_lint()
+        lint_error_count = run_post_compile_lint()
+
+        if failed_logs:
+            print("\nCompilation failed before all state/index/log updates completed.")
+            print("Failed logs: " + ", ".join(failed_logs))
+            print("Skipping archive step; inspect lint output and repair partial writes first.")
+            sys.exit(1)
+
+        if lint_error_count:
+            print("\nPost-compile structural errors detected.")
+            print("Skipping archive step; repair knowledge/index.md or broken links first.")
+            sys.exit(1)
+
         archive_old_logs()
 
 
-def run_post_compile_lint() -> None:
-    """Run structural lint checks after compilation."""
+def run_post_compile_lint() -> int:
+    """Run structural lint checks after compilation and return the error count."""
     from lint import (
         check_broken_links,
         check_index_consistency,
@@ -285,9 +303,11 @@ def run_post_compile_lint() -> None:
 
     if not issues:
         print("  All checks passed.")
+        return 0
     else:
         errors = sum(1 for i in issues if i["severity"] == "error")
         print(f"  Total: {len(issues)} issues ({errors} errors)")
+        return errors
 
 
 ARCHIVE_AFTER_DAYS = 30
