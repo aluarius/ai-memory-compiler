@@ -276,38 +276,59 @@ def main():
 
 
 def run_post_compile_lint() -> int:
-    """Run structural lint checks after compilation and return the error count."""
+    """Run structural lint checks after compilation and return the error count.
+
+    Auto-recovers from index drift: if the LLM forgot to update
+    knowledge/index.md when creating an article, append a stub row and
+    re-check. Same for missing backlinks (mechanical symmetric reverses).
+    """
     from lint import (
+        apply_fixes,
         check_broken_links,
         check_index_consistency,
+        check_missing_backlinks,
         check_orphan_pages,
         check_sparse_articles,
         check_stale_articles,
         check_weak_connectivity,
     )
 
+    def collect() -> list[dict]:
+        result: list[dict] = []
+        for name, fn in [
+            ("Broken links", check_broken_links),
+            ("Index consistency", check_index_consistency),
+            ("Orphan pages", check_orphan_pages),
+            ("Sparse articles", check_sparse_articles),
+            ("Weak connectivity", check_weak_connectivity),
+            ("Stale articles", check_stale_articles),
+            ("Missing backlinks", check_missing_backlinks),
+        ]:
+            found = fn()
+            result.extend(found)
+            if found:
+                print(f"  [{name}] {len(found)} issue(s)")
+        return result
+
     print("\nRunning post-compile health checks...")
-    issues = []
-    for name, fn in [
-        ("Broken links", check_broken_links),
-        ("Index consistency", check_index_consistency),
-        ("Orphan pages", check_orphan_pages),
-        ("Sparse articles", check_sparse_articles),
-        ("Weak connectivity", check_weak_connectivity),
-        ("Stale articles", check_stale_articles),
-    ]:
-        found = fn()
-        issues.extend(found)
-        if found:
-            print(f"  [{name}] {len(found)} issue(s)")
+    issues = collect()
+
+    auto_fixable = [i for i in issues if i.get("auto_fixable")]
+    if auto_fixable:
+        print(f"\n  Auto-fixing {len(auto_fixable)} mechanical issues...")
+        counts = apply_fixes(issues)
+        print(f"    Backlinks added: {counts['backlinks_added']}")
+        print(f"    Index rows added: {counts['index_rows_added']}")
+        if any(counts.values()):
+            print("\n  Re-checking after fix...")
+            issues = collect()
 
     if not issues:
         print("  All checks passed.")
         return 0
-    else:
-        errors = sum(1 for i in issues if i["severity"] == "error")
-        print(f"  Total: {len(issues)} issues ({errors} errors)")
-        return errors
+    errors = sum(1 for i in issues if i["severity"] == "error")
+    print(f"  Total: {len(issues)} issues ({errors} errors)")
+    return errors
 
 
 ARCHIVE_AFTER_DAYS = 30

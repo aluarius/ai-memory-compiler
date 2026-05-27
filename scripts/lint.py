@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 from pathlib import Path
 
 from codex_exec import run_codex_prompt
@@ -72,15 +73,20 @@ def check_index_consistency() -> list[dict]:
         issues.append({
             "severity": "error",
             "check": "index_consistency",
+            "subcheck": "unindexed_article",
             "file": f"{link}.md",
+            "target": link,
             "detail": f"Article exists on disk but is missing from knowledge/index.md: [[{link}]]",
+            "auto_fixable": True,
         })
 
     for link in find_missing_index_targets():
         issues.append({
             "severity": "error",
             "check": "index_consistency",
+            "subcheck": "missing_target",
             "file": "index.md",
+            "target": link,
             "detail": f"knowledge/index.md references missing article: [[{link}]]",
         })
 
@@ -159,6 +165,8 @@ def check_missing_backlinks() -> list[dict]:
                         "severity": "suggestion",
                         "check": "missing_backlink",
                         "file": str(rel),
+                        "source": source_link,
+                        "target": link,
                         "detail": f"[[{source_link}]] links to [[{link}]] but not vice versa",
                         "auto_fixable": True,
                     })
@@ -303,6 +311,182 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
     return issues
 
 
+# =====================================================================
+# Auto-fixers
+# =====================================================================
+#
+# These functions are imported by compile.py so a post-compile lint can
+# auto-recover from drift instead of bailing with "please fix manually".
+
+
+_FRONTMATTER_FIELD = re.compile(r"^([a-zA-Z_]+)\s*:\s*(.*)$")
+
+
+def _parse_frontmatter(text: str) -> dict:
+    """Tiny YAML-frontmatter parser. Returns a dict of scalar fields and
+    flat lists. Good enough for our article frontmatter; not a real YAML
+    implementation."""
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}
+    body = text[3:end].strip("\n")
+    out: dict = {}
+    current_list_key: str | None = None
+    for raw in body.splitlines():
+        line = raw.rstrip()
+        if line.startswith("  - ") and current_list_key:
+            out.setdefault(current_list_key, []).append(line[4:].strip().strip('"').strip("'"))
+            continue
+        m = _FRONTMATTER_FIELD.match(line)
+        if not m:
+            current_list_key = None
+            continue
+        key, value = m.group(1), m.group(2).strip()
+        if value == "":
+            current_list_key = key
+            continue
+        current_list_key = None
+        out[key] = value.strip('"').strip("'")
+    return out
+
+
+def _insert_backlink(text: str, source_wikilink: str) -> str:
+    """Insert `- [[source]]` into '## Related Concepts'. Create the
+    section before '## Sources' if missing. Idempotent: skips if the
+    backlink already exists anywhere in the text."""
+    if f"[[{source_wikilink}]]" in text:
+        return text
+    new_line = f"- [[{source_wikilink}]]"
+    lines = text.splitlines(keepends=False)
+
+    related_idx = None
+    sources_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() == "## Related Concepts":
+            related_idx = i
+        elif line.strip() == "## Sources":
+            sources_idx = i
+
+    if related_idx is not None:
+        end = len(lines)
+        for j in range(related_idx + 1, len(lines)):
+            if lines[j].startswith("## "):
+                end = j
+                break
+        insert_at = end
+        while insert_at > related_idx + 1 and lines[insert_at - 1].strip() == "":
+            insert_at -= 1
+        lines.insert(insert_at, new_line)
+    else:
+        block = ["", "## Related Concepts", "", new_line, ""]
+        if sources_idx is not None:
+            for k, b in enumerate(block):
+                lines.insert(sources_idx + k, b)
+        else:
+            if lines and lines[-1].strip() != "":
+                lines.append("")
+            lines.extend(["## Related Concepts", "", new_line])
+
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def fix_missing_backlinks(issues: list[dict]) -> int:
+    """Apply auto-fix for symmetric backlinks. Returns count of links added."""
+    by_target: dict[str, list[str]] = {}
+    for issue in issues:
+        if issue.get("check") != "missing_backlink" or not issue.get("auto_fixable"):
+            continue
+        target = issue.get("target")
+        source = issue.get("source")
+        if not target or not source:
+            continue
+        by_target.setdefault(target, []).append(source)
+
+    written = 0
+    for target, sources in by_target.items():
+        target_path = KNOWLEDGE_DIR / f"{target}.md"
+        if not target_path.exists():
+            continue
+        content = target_path.read_text(encoding="utf-8")
+        modified = content
+        for source in sources:
+            new_content = _insert_backlink(modified, source)
+            if new_content != modified:
+                written += 1
+                modified = new_content
+        if modified != content:
+            target_path.write_text(modified, encoding="utf-8")
+    return written
+
+
+def fix_index_consistency(issues: list[dict]) -> int:
+    """Append index rows for unindexed articles using their frontmatter.
+
+    Stub-row format: `| [[slug]] | <title> | <source> | <updated> |`. The
+    LLM may later refine the summary; this just gets the article visible
+    in the index so it stops being a structural error.
+
+    Returns count of rows appended.
+    """
+    targets: list[str] = []
+    for issue in issues:
+        if issue.get("check") != "index_consistency":
+            continue
+        if issue.get("subcheck") != "unindexed_article":
+            continue
+        target = issue.get("target")
+        if target and target not in targets:
+            targets.append(target)
+
+    if not targets:
+        return 0
+
+    index_path = KNOWLEDGE_DIR / "index.md"
+    if not index_path.exists():
+        return 0
+    index_text = index_path.read_text(encoding="utf-8")
+
+    new_rows: list[str] = []
+    for target in targets:
+        article_path = KNOWLEDGE_DIR / f"{target}.md"
+        if not article_path.exists():
+            continue
+        article_text = article_path.read_text(encoding="utf-8")
+        fm = _parse_frontmatter(article_text)
+        title = fm.get("title") or target.split("/")[-1].replace("-", " ").title()
+        sources = fm.get("sources") or []
+        source_str = sources[0] if isinstance(sources, list) and sources else "(unknown)"
+        if isinstance(sources, list) and len(sources) > 1:
+            source_str = ", ".join(sources)
+        updated = fm.get("updated") or fm.get("created") or today_iso()
+        row = f"| [[{target}]] | {title} (auto-stub: refine summary on next compile) | {source_str} | {updated} |"
+        new_rows.append(row)
+
+    if not new_rows:
+        return 0
+
+    if not index_text.endswith("\n"):
+        index_text += "\n"
+    index_text += "\n".join(new_rows) + "\n"
+    index_path.write_text(index_text, encoding="utf-8")
+    return len(new_rows)
+
+
+def apply_fixes(all_issues: list[dict]) -> dict:
+    """Apply all auto-fixers. Returns counts per fixer."""
+    return {
+        "backlinks_added": fix_missing_backlinks(all_issues),
+        "index_rows_added": fix_index_consistency(all_issues),
+    }
+
+
+# =====================================================================
+# Report
+# =====================================================================
+
+
 def generate_report(all_issues: list[dict]) -> str:
     """Generate a markdown lint report."""
     errors = [i for i in all_issues if i["severity"] == "error"]
@@ -339,19 +523,9 @@ def generate_report(all_issues: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Lint the knowledge base")
-    parser.add_argument(
-        "--structural-only",
-        action="store_true",
-        help="Skip LLM-based checks (contradictions) - faster and free",
-    )
-    args = parser.parse_args()
-
-    print("Running knowledge base lint checks...")
+def _run_structural_checks() -> list[dict]:
+    """Run all structural checks and return the combined issue list."""
     all_issues: list[dict] = []
-
-    # Structural checks (free, instant)
     checks = [
         ("Broken links", check_broken_links),
         ("Index consistency", check_index_consistency),
@@ -362,21 +536,57 @@ def main():
         ("Sparse articles", check_sparse_articles),
         ("Weak connectivity", check_weak_connectivity),
     ]
-
     for name, check_fn in checks:
         print(f"  Checking: {name}...")
         issues = check_fn()
         all_issues.extend(issues)
         print(f"    Found {len(issues)} issue(s)")
+    return all_issues
 
-    # LLM check (costs money)
-    if not args.structural_only:
+
+def main():
+    parser = argparse.ArgumentParser(description="Lint the knowledge base")
+    parser.add_argument(
+        "--structural-only",
+        action="store_true",
+        help="Skip LLM-based checks (contradictions) - faster and free",
+    )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help=(
+            "Apply auto-fixes for known mechanical issues: symmetric "
+            "backlinks and unindexed-article stub rows. Re-runs structural "
+            "checks after fixing to verify."
+        ),
+    )
+    args = parser.parse_args()
+
+    print("Running knowledge base lint checks...")
+    all_issues = _run_structural_checks()
+
+    # LLM check (costs money) — skipped under --fix to keep the fix loop fast and free
+    if not args.structural_only and not args.fix:
         print("  Checking: Contradictions (LLM)...")
         issues = asyncio.run(check_contradictions())
         all_issues.extend(issues)
         print(f"    Found {len(issues)} issue(s)")
-    else:
+    elif args.structural_only:
         print("  Skipping: Contradictions (--structural-only)")
+    else:
+        print("  Skipping: Contradictions (--fix implies structural-only)")
+
+    # Auto-fix pass
+    if args.fix:
+        print("\nApplying auto-fixes...")
+        counts = apply_fixes(all_issues)
+        print(f"  Backlinks added: {counts['backlinks_added']}")
+        print(f"  Index rows added: {counts['index_rows_added']}")
+        if any(counts.values()):
+            print("\nRe-running structural checks after fix...")
+            all_issues = _run_structural_checks()
+        else:
+            print("  Nothing to fix.")
 
     # Generate and save report
     report = generate_report(all_issues)
