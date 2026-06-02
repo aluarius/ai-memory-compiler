@@ -42,6 +42,7 @@ STATE_LOCK_FILE = SCRIPTS_DIR / ".locks" / "flush-state.lock"
 RUNTIME_EVENTS_FILE = REPORTS_DIR / "runtime-events.md"
 RUNTIME_EVENTS_LOCK_FILE = SCRIPTS_DIR / ".locks" / "runtime-events.lock"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
+FAILED_FLUSH_DIR = REPORTS_DIR / "failed-flushes"
 
 # Set up file-based logging so we can verify the background process ran.
 # The parent process sends stdout/stderr to DEVNULL (to avoid the inherited
@@ -127,6 +128,20 @@ def append_runtime_event(kind: str, message: str, metadata: SessionMetadata) -> 
             RUNTIME_EVENTS_FILE.write_text("# Runtime Events\n\n", encoding="utf-8")
         with open(RUNTIME_EVENTS_FILE, "a", encoding="utf-8") as f:
             f.write(entry)
+
+
+def preserve_failed_context(context_file: Path) -> Path | None:
+    """Move a failed flush context aside so it can be retried or inspected later."""
+    try:
+        FAILED_FLUSH_DIR.mkdir(parents=True, exist_ok=True)
+        destination = FAILED_FLUSH_DIR / context_file.name
+        if destination.exists():
+            timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+            destination = FAILED_FLUSH_DIR / f"{context_file.stem}-{timestamp}{context_file.suffix}"
+        return context_file.replace(destination)
+    except OSError:
+        logging.exception("Failed to preserve flush context: %s", context_file)
+        return None
 
 
 def append_to_daily_log(content: str, metadata: SessionMetadata, section: str = "Session") -> None:
@@ -411,18 +426,28 @@ def main() -> None:
 
     if response == "FLUSH_OK":
         logging.info("Result: FLUSH_OK")
+        flush_failed = False
     elif response.startswith("FLUSH_ERROR"):
         logging.error("Result: %s", response)
         append_runtime_event("flush-error", response, metadata)
+        preserved_path = preserve_failed_context(context_file)
+        if preserved_path:
+            logging.error("Failed flush context preserved: %s", preserved_path)
+        flush_failed = True
     else:
         logging.info("Result: saved to daily log (%d chars)", len(response))
         append_to_daily_log(response, metadata, "Session")
+        flush_failed = False
 
-    remember_flush(metadata.session_id, context_hash)
-    context_file.unlink(missing_ok=True)
-    maybe_trigger_compilation()
+    if not flush_failed:
+        remember_flush(metadata.session_id, context_hash)
+        context_file.unlink(missing_ok=True)
+        maybe_trigger_compilation()
 
-    logging.info("Flush complete for session %s", metadata.session_id)
+    if flush_failed:
+        logging.error("Flush failed for session %s", metadata.session_id)
+    else:
+        logging.info("Flush complete for session %s", metadata.session_id)
 
 
 if __name__ == "__main__":
