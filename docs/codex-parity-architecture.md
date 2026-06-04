@@ -66,7 +66,8 @@ Add only small seams where they are already justified:
 
 In other words:
 
-- keep `flush.py`, `compile.py`, `query.py`, `lint.py` as top-level scripts
+- keep `flush.py`, `compile.py`, `query.py`, `lint.py`, and `health.py` as
+  top-level scripts
 - keep Claude as the default processing backend
 - treat Codex as an additional input source, not as a reason to redesign the app
 

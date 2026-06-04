@@ -261,19 +261,40 @@ When processing a daily log:
 
 **Why this works without RAG:** At personal knowledge base scale (50-500 articles), the LLM reading a structured index outperforms cosine similarity. The LLM understands what the question is really asking and selects pages accordingly. Embeddings find similar words; the LLM finds relevant concepts.
 
-### 3. Lint (Health Checks)
+### 3. Lint (Structural and Semantic Checks)
 
-Seven checks, run periodically:
+Run periodically to verify the compiled knowledge graph:
 
 1. **Broken links** - `[[wikilinks]]` pointing to non-existent articles
-2. **Orphan pages** - Articles with zero inbound links from other articles
-3. **Orphan sources** - Daily logs that haven't been compiled yet
-4. **Stale articles** - Source daily log changed since article was last compiled
-5. **Contradictions** - Conflicting claims across articles (requires LLM judgment)
+2. **Index consistency** - articles missing from `knowledge/index.md`, or index rows pointing to missing articles
+3. **Orphan pages** - Articles with zero inbound links from other articles
+4. **Orphan sources** - Daily logs that haven't been compiled yet
+5. **Stale articles** - Source daily log changed since article was last compiled
 6. **Missing backlinks** - A links to B but B doesn't link back to A
 7. **Sparse articles** - Below 200 words, likely incomplete
+8. **Weak connectivity** - Articles reachable from the graph but under-linked
+9. **Contradictions** - Conflicting claims across articles (requires LLM judgment)
 
 Output: a markdown report with severity levels (error, warning, suggestion).
+
+### 4. Health (Operational Doctor)
+
+`scripts/health.py` is the first command to run during routine maintenance. It
+performs local-only checks and reports pipeline state without making LLM calls
+or mutating the knowledge base.
+
+It summarizes:
+
+- structural lint counts;
+- article and daily-log counts;
+- uncompiled or stale daily logs;
+- preserved failed flush contexts in `reports/failed-flushes/`;
+- pending temporary flush contexts in `scripts/`;
+- recent compile/flush log status;
+- configured runtimes for `flush`, `compile`, `query`, and `lint`.
+
+Use `--json` for scripts and `--strict` when automation should fail on any
+attention item, not only structural errors.
 
 ---
 
@@ -308,7 +329,8 @@ llm-personal-kb/
 |-- scripts/                         # CLI tools
 |   |-- compile.py                   #   Compile daily logs -> knowledge articles
 |   |-- query.py                     #   Ask questions (index-guided, no RAG)
-|   |-- lint.py                      #   7 health checks
+|   |-- lint.py                      #   Structural and semantic KB checks
+|   |-- health.py                    #   Local operational health summary
 |   |-- flush.py                     #   Extract memories from conversations (background)
 |   |-- import_session.py            #   Feed external agents (e.g. Codex) into the same pipeline
 |   |-- mcp_server.py                #   MCP server for knowledge base access
@@ -456,16 +478,18 @@ With `--file-back`, creates a Q&A article in `knowledge/qa/` and updates the ind
 
 ### lint.py - Health Checks
 
-Seven checks:
+Checks:
 
 | Check | Type | Catches |
 |-------|------|---------|
 | Broken links | Structural | `[[wikilinks]]` to non-existent articles |
+| Index consistency | Structural | Articles missing from `knowledge/index.md`, or missing index targets |
 | Orphan pages | Structural | Articles with zero inbound links |
 | Orphan sources | Structural | Daily logs not yet compiled |
 | Stale articles | Structural | Source logs changed since compilation |
 | Missing backlinks | Structural | A links to B but B doesn't link back |
 | Sparse articles | Structural | Under 200 words |
+| Weak connectivity | Structural | Under-linked articles that are reachable but hard to navigate to |
 | Contradictions | LLM | Conflicting claims across articles |
 
 **CLI:**
@@ -475,6 +499,21 @@ uv run python scripts/lint.py --structural-only  # skip LLM check (free)
 ```
 
 Reports saved to `reports/lint-YYYY-MM-DD.md`.
+
+### health.py - Operational Health Summary
+
+Runs local-only checks and prints the current pipeline status. It does not call
+an LLM, does not write reports, and does not mutate the knowledge base.
+
+**CLI:**
+```bash
+uv run python scripts/health.py           # human-readable health summary
+uv run python scripts/health.py --json    # machine-readable status
+uv run python scripts/health.py --strict  # fail on attention items
+```
+
+Use it before manual log inspection. See `docs/operations.md` for status
+semantics and exit codes.
 
 ---
 

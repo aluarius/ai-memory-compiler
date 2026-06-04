@@ -1,9 +1,9 @@
 """
 Lint the knowledge base for structural and semantic health.
 
-Runs 7 checks: broken links, orphan pages, orphan sources, stale articles,
-contradictions (LLM), missing backlinks, sparse articles, and weak graph
-connectivity.
+Runs structural checks for broken links, index consistency, orphan pages,
+orphan sources, stale articles, missing backlinks, sparse articles, and weak
+graph connectivity. The full mode also runs an LLM contradiction check.
 
 Usage:
     uv run python lint.py                    # all checks
@@ -276,7 +276,6 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
             from claude_agent_sdk import (
                 AssistantMessage,
                 ClaudeAgentOptions,
-                ResultMessage,
                 TextBlock,
                 query,
             )
