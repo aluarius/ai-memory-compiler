@@ -55,6 +55,7 @@ class HealthReport:
     uncompiled_daily_logs: list[str]
     stale_daily_logs: list[str]
     failed_flush_contexts: list[str]
+    permanent_failed_contexts: list[str]
     pending_flush_contexts: list[str]
     last_compile: PipelineLogStatus
     last_flush_line: str | None
@@ -109,6 +110,13 @@ def _failed_flush_contexts() -> list[Path]:
     if not FAILED_FLUSH_DIR.exists():
         return []
     return sorted(path for path in FAILED_FLUSH_DIR.glob("*.md") if path.is_file())
+
+
+def _permanent_failed_contexts() -> list[Path]:
+    permanent_dir = FAILED_FLUSH_DIR / "permanent"
+    if not permanent_dir.exists():
+        return []
+    return sorted(path for path in permanent_dir.glob("*.md") if path.is_file())
 
 
 def _uncompiled_daily_logs(state: dict[str, Any]) -> list[str]:
@@ -257,6 +265,7 @@ def collect_health() -> HealthReport:
         uncompiled_daily_logs=uncompiled,
         stale_daily_logs=stale,
         failed_flush_contexts=_relative_names(failed_flushes, REPORTS_DIR),
+        permanent_failed_contexts=_relative_names(_permanent_failed_contexts(), REPORTS_DIR),
         pending_flush_contexts=_relative_names(pending_flushes, SCRIPTS_DIR),
         last_compile=last_compile,
         last_flush_line=_last_flush_line(_tail_lines(FLUSH_LOG_FILE, limit=50)),
@@ -299,6 +308,7 @@ def format_report(report: HealthReport, *, max_items: int = 8) -> str:
         "",
         "Flush pipeline",
         f"- Failed flush contexts: {len(report.failed_flush_contexts)}",
+        f"- Permanently failed contexts: {len(report.permanent_failed_contexts)}",
         f"- Pending temp contexts: {len(report.pending_flush_contexts)}",
         f"- Last flush log line: {report.last_flush_line or 'missing'}",
         "",
@@ -334,8 +344,11 @@ def format_report(report: HealthReport, *, max_items: int = 8) -> str:
     if report.issue_counts.errors:
         lines.append("- Run: uv run python scripts/lint.py --structural-only")
     if report.failed_flush_contexts:
+        lines.append("- Run: uv run python scripts/flush.py --retry-failed")
+    if report.permanent_failed_contexts:
         lines.append(
-            "- Inspect reports/failed-flushes; retry automation is the next maintenance item."
+            "- Review reports/failed-flushes/permanent — these exceeded retry limits "
+            "and need manual triage."
         )
     if report.pending_flush_contexts:
         lines.append(

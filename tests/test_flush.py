@@ -91,6 +91,7 @@ def test_main_preserves_failed_context_without_marking_flushed_or_compiling(
             model="gpt-5",
             cwd="/repo",
             source="test",
+            retry_failed=False,
         ),
     )
     monkeypatch.setattr(flush, "cleanup_old_temp_files", lambda: calls.append("cleanup"))
@@ -113,3 +114,125 @@ def test_main_preserves_failed_context_without_marking_flushed_or_compiling(
     assert "event" in calls
     assert "remember" not in calls
     assert "compile" not in calls
+
+
+# ---------------------------------------------------------------------------
+# --retry-failed lifecycle
+# ---------------------------------------------------------------------------
+
+UUID_A = "019e2b61-ebf1-73b3-a5cd-92b50c8921d8"
+UUID_B = "40b4f505-6d7f-472a-a40d-adbbb9c820e2"
+
+
+def test_extract_session_id_handles_all_prefixes() -> None:
+    assert flush.extract_session_id(f"session-flush-{UUID_B}-20260603-1200.md") == UUID_B
+    assert flush.extract_session_id(f"flush-context-{UUID_B}.md") == UUID_B
+    assert flush.extract_session_id(f"import-flush-{UUID_A}-20260606-004107.md") == UUID_A
+    assert flush.extract_session_id("garbage-name.md") is None
+
+
+def _setup_failed_dir(tmp_path, monkeypatch):
+    failed_dir = tmp_path / "failed-flushes"
+    failed_dir.mkdir()
+    monkeypatch.setattr(flush, "FAILED_FLUSH_DIR", failed_dir)
+    monkeypatch.setattr(flush, "PERMANENT_FAILED_DIR", failed_dir / "permanent")
+    monkeypatch.setattr(flush, "RETRY_STATE_FILE", failed_dir / "retry-state.json")
+    monkeypatch.setattr(flush, "DAILY_DIR", tmp_path / "daily")
+    monkeypatch.setattr(flush, "DAILY_LOG_LOCK_FILE", tmp_path / ".daily.lock")
+    return failed_dir
+
+
+def test_retry_failed_dedups_per_session_and_deletes_all_copies_on_success(
+    tmp_path, monkeypatch
+) -> None:
+    failed_dir = _setup_failed_dir(tmp_path, monkeypatch)
+    import os
+    import time as time_mod
+
+    old = failed_dir / f"import-flush-{UUID_A}-20260606-004107.md"
+    new = failed_dir / f"import-flush-{UUID_A}-20260606-021244.md"
+    old.write_text("old copy", encoding="utf-8")
+    new.write_text("new copy", encoding="utf-8")
+    now = time_mod.time()
+    os.utime(old, (now - 100, now - 100))
+    os.utime(new, (now, now))
+
+    seen_contexts = []
+
+    async def fake_flush(context: str) -> str:
+        seen_contexts.append(context)
+        return "**Context:** recovered content"
+
+    monkeypatch.setattr(flush, "run_flush", fake_flush)
+
+    recovered = flush.retry_failed_flushes()
+
+    assert recovered == 1
+    assert seen_contexts == ["new copy"]  # newest copy only
+    assert not old.exists() and not new.exists()
+    daily = list((tmp_path / "daily").glob("*.md"))
+    assert len(daily) == 1
+    assert "recovered content" in daily[0].read_text(encoding="utf-8")
+
+
+def test_retry_failed_flush_ok_deletes_without_logging(tmp_path, monkeypatch) -> None:
+    failed_dir = _setup_failed_dir(tmp_path, monkeypatch)
+    f = failed_dir / f"session-flush-{UUID_B}.md"
+    f.write_text("noise", encoding="utf-8")
+
+    async def fake_flush(context: str) -> str:
+        return "FLUSH_OK"
+
+    monkeypatch.setattr(flush, "run_flush", fake_flush)
+
+    recovered = flush.retry_failed_flushes()
+
+    assert recovered == 1
+    assert not f.exists()
+    assert not (tmp_path / "daily").exists()
+
+
+def test_retry_failed_increments_attempts_then_moves_to_permanent(
+    tmp_path, monkeypatch
+) -> None:
+    failed_dir = _setup_failed_dir(tmp_path, monkeypatch)
+    f = failed_dir / f"flush-context-{UUID_B}.md"
+    f.write_text("never works", encoding="utf-8")
+
+    async def fail_flush(context: str) -> str:
+        return "FLUSH_ERROR: RuntimeError: nope"
+
+    monkeypatch.setattr(flush, "run_flush", fail_flush)
+
+    for expected_attempts in (1, 2, 3):
+        recovered = flush.retry_failed_flushes()
+        assert recovered == 0
+        state = flush.load_retry_state()
+        assert state[UUID_B]["attempts"] == expected_attempts
+        assert f.exists()
+
+    # Fourth run: over the limit — moved to permanent, state cleared.
+    recovered = flush.retry_failed_flushes()
+    assert recovered == 0
+    assert not f.exists()
+    assert (failed_dir / "permanent" / f.name).exists()
+    assert UUID_B not in flush.load_retry_state()
+
+
+def test_retry_failed_skips_unparseable_and_empty_files(tmp_path, monkeypatch) -> None:
+    failed_dir = _setup_failed_dir(tmp_path, monkeypatch)
+    unparseable = failed_dir / "garbage-name.md"
+    unparseable.write_text("content", encoding="utf-8")
+    empty = failed_dir / f"session-flush-{UUID_A}.md"
+    empty.write_text("   \n", encoding="utf-8")
+
+    async def fake_flush(context: str) -> str:
+        raise AssertionError("should not be called")
+
+    monkeypatch.setattr(flush, "run_flush", fake_flush)
+
+    recovered = flush.retry_failed_flushes()
+
+    assert recovered == 0
+    assert unparseable.exists()  # left for manual inspection
+    assert not empty.exists()  # dropped

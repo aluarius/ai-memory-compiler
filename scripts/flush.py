@@ -54,8 +54,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-MAX_RETRIES = 2
-RETRY_DELAY = 3  # seconds
+# Exponential-ish backoff: SDK outages observed in the wild last minutes,
+# not seconds, so a couple of quick retries plus one patient one.
+RETRY_DELAYS = (3, 30, 180)  # seconds between attempts; total attempts = len + 1
+MAX_FAILED_RETRIES = 3  # --retry-failed attempts before a context goes permanent
 COMPILE_AFTER_HOUR = 22  # 10 PM local time
 TEMP_MAX_AGE = 3600  # 1 hour
 DEDUP_WINDOW_SECONDS = 120
@@ -242,8 +244,9 @@ async def run_flush_claude(prompt: str) -> str:
     )
 
     last_error = None
+    total_attempts = len(RETRY_DELAYS) + 1
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, total_attempts + 1):
         response = ""
         stderr_lines: list[str] = []
 
@@ -275,15 +278,16 @@ async def run_flush_claude(prompt: str) -> str:
             logging.error(
                 "Agent SDK error (attempt %d/%d): %s\nCLI stderr:\n%s\n%s",
                 attempt,
-                MAX_RETRIES,
+                total_attempts,
                 e,
                 stderr_output,
                 traceback.format_exc(),
             )
             last_error = e
-            if attempt < MAX_RETRIES:
-                logging.info("Retrying in %d seconds...", RETRY_DELAY)
-                await asyncio.sleep(RETRY_DELAY)
+            if attempt <= len(RETRY_DELAYS):
+                delay = RETRY_DELAYS[attempt - 1]
+                logging.info("Retrying in %d seconds...", delay)
+                await asyncio.sleep(delay)
 
     return f"FLUSH_ERROR: {type(last_error).__name__}: {last_error}"
 
@@ -371,20 +375,181 @@ def cleanup_old_temp_files() -> None:
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Failed-flush lifecycle (--retry-failed)
+#
+# preserve_failed_context() stockpiles contexts in reports/failed-flushes/.
+# This mode drains them: dedup per session (keep newest copy), retry the
+# flush, delete all copies on success. After MAX_FAILED_RETRIES unsuccessful
+# retries a session's contexts move to failed-flushes/permanent/ and stop
+# being retried — health.py surfaces those for manual review.
+# ---------------------------------------------------------------------------
+
+PERMANENT_FAILED_DIR = FAILED_FLUSH_DIR / "permanent"
+RETRY_STATE_FILE = FAILED_FLUSH_DIR / "retry-state.json"
+
+_SESSION_ID_RE = None  # compiled lazily; see extract_session_id
+
+
+def extract_session_id(filename: str) -> str | None:
+    """Pull the session UUID out of a failed-context filename.
+
+    Filenames look like session-flush-<uuid>-<ts>.md, flush-context-<uuid>.md,
+    import-flush-<uuid>-<ts>-<ts2>.md — the one stable token is the UUID.
+    """
+    global _SESSION_ID_RE
+    if _SESSION_ID_RE is None:
+        import re
+
+        _SESSION_ID_RE = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        )
+    m = _SESSION_ID_RE.search(filename)
+    return m.group(0) if m else None
+
+
+def load_retry_state() -> dict:
+    if RETRY_STATE_FILE.exists():
+        try:
+            return json.loads(RETRY_STATE_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save_retry_state(state: dict) -> None:
+    RETRY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RETRY_STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def group_failed_contexts() -> dict[str, list[Path]]:
+    """Group failed context files by session id. Unparseable names are skipped."""
+    groups: dict[str, list[Path]] = {}
+    if not FAILED_FLUSH_DIR.exists():
+        return groups
+    for f in FAILED_FLUSH_DIR.glob("*.md"):
+        session_id = extract_session_id(f.name)
+        if session_id is None:
+            logging.warning("retry-failed: cannot parse session id from %s, skipping", f.name)
+            continue
+        groups.setdefault(session_id, []).append(f)
+    return groups
+
+
+def move_to_permanent(files: list[Path]) -> None:
+    PERMANENT_FAILED_DIR.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        try:
+            f.replace(PERMANENT_FAILED_DIR / f.name)
+        except OSError:
+            logging.exception("retry-failed: could not move %s to permanent", f.name)
+
+
+def retry_failed_flushes() -> int:
+    """Drain reports/failed-flushes/. Returns count of successfully recovered sessions."""
+    groups = group_failed_contexts()
+    if not groups:
+        logging.info("retry-failed: nothing to retry")
+        return 0
+
+    retry_state = load_retry_state()
+    recovered = 0
+
+    for session_id, files in sorted(groups.items()):
+        files.sort(key=lambda f: f.stat().st_mtime)
+        newest = files[-1]
+        duplicates = files[:-1]
+
+        attempts = retry_state.get(session_id, {}).get("attempts", 0)
+        if attempts >= MAX_FAILED_RETRIES:
+            logging.warning(
+                "retry-failed: session %s exceeded %d retries, moving %d file(s) to permanent",
+                session_id,
+                MAX_FAILED_RETRIES,
+                len(files),
+            )
+            move_to_permanent(files)
+            retry_state.pop(session_id, None)
+            continue
+
+        context = newest.read_text(encoding="utf-8").strip()
+        if not context:
+            logging.info("retry-failed: %s is empty, dropping all copies", session_id)
+            for f in files:
+                f.unlink(missing_ok=True)
+            retry_state.pop(session_id, None)
+            continue
+
+        logging.info(
+            "retry-failed: session %s, attempt %d/%d, %d chars (%d duplicate copies)",
+            session_id,
+            attempts + 1,
+            MAX_FAILED_RETRIES,
+            len(context),
+            len(duplicates),
+        )
+
+        response = asyncio.run(run_flush(context))
+
+        if response.startswith("FLUSH_ERROR"):
+            retry_state.setdefault(session_id, {})["attempts"] = attempts + 1
+            retry_state[session_id]["last_error"] = response[:200]
+            retry_state[session_id]["last_attempt"] = datetime.now(
+                timezone.utc
+            ).astimezone().isoformat(timespec="seconds")
+            logging.error("retry-failed: session %s still failing: %s", session_id, response[:120])
+            continue
+
+        if response != "FLUSH_OK":
+            metadata = SessionMetadata(
+                session_id=session_id,
+                agent="unknown",
+                provider="unknown",
+                source="retry-failed",
+            )
+            append_to_daily_log(response, metadata, "Session (recovered)")
+            logging.info("retry-failed: session %s recovered (%d chars)", session_id, len(response))
+        else:
+            logging.info("retry-failed: session %s had nothing worth saving", session_id)
+
+        for f in files:
+            f.unlink(missing_ok=True)
+        retry_state.pop(session_id, None)
+        recovered += 1
+
+    save_retry_state(retry_state)
+    return recovered
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract long-term memory from session context")
-    parser.add_argument("context_file", type=Path)
-    parser.add_argument("session_id", type=str)
+    parser.add_argument("context_file", type=Path, nargs="?")
+    parser.add_argument("session_id", type=str, nargs="?")
     parser.add_argument("--agent", default="claude_code")
     parser.add_argument("--provider", default="anthropic")
     parser.add_argument("--model", default=None)
     parser.add_argument("--cwd", default=None)
     parser.add_argument("--source", default=None)
-    return parser.parse_args()
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry preserved failed-flush contexts instead of flushing a new session",
+    )
+    args = parser.parse_args()
+    if not args.retry_failed and (args.context_file is None or args.session_id is None):
+        parser.error("context_file and session_id are required unless --retry-failed is given")
+    return args
 
 
 def main() -> None:
     args = parse_args()
+
+    if args.retry_failed:
+        recovered = retry_failed_flushes()
+        logging.info("retry-failed: done, %d session(s) recovered", recovered)
+        print(f"Recovered {recovered} failed flush session(s)")
+        return
+
     context_file = args.context_file
     metadata = SessionMetadata(
         session_id=args.session_id,
