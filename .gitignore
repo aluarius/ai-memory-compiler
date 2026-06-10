@@ -32,3 +32,4 @@ scripts/runtime-config.json
 Thumbs.db
 
 .obsidian/
+scripts/maintenance.log
