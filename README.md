@@ -140,8 +140,9 @@ Tools: `search_knowledge`, `list_articles`, `read_article`, `search_daily_logs`.
 
 ```
 Session ends -> hook captures transcript -> sanitize secrets -> flush.py extracts knowledge
-  -> daily/YYYY-MM-DD.md -> compile.py -> knowledge/concepts/, connections/, qa/
-    -> next session starts -> hook injects knowledge index -> agent "remembers"
+  -> daily/YYYY-MM-DD.md -> compile.py -> knowledge/concepts/, connections/
+    -> next session starts -> hook injects recent+hub index slice -> agent "remembers"
+      -> anything deeper -> knowledge-base MCP tools (search_knowledge, read_article)
 ```
 
 - **flush.py** — decides what's worth saving (runs after every session, retries on failures)
@@ -155,8 +156,9 @@ Session ends -> hook captures transcript -> sanitize secrets -> flush.py extract
 uv run python scripts/health.py                      # local operational health summary
 uv run python scripts/compile.py                     # compile new daily logs
 uv run python scripts/compile.py --dry-run            # preview what would compile
-uv run python scripts/query.py "question"             # ask the knowledge base
+uv run python scripts/lint.py --fix                   # mechanical KB repairs (free)
 uv run python scripts/lint.py --structural-only       # structural lint report (free)
+uv run python scripts/flush.py --retry-failed          # drain failed flush contexts
 uv run python scripts/import_session.py transcript.jsonl --agent codex  # manual import
 ```
 
@@ -170,6 +172,30 @@ It checks the KB graph, daily-log ingestion state, failed flush contexts,
 pending temp contexts, recent compile/flush logs, and runtime configuration
 without making LLM calls. See [docs/operations.md](docs/operations.md) for
 output semantics and exit codes.
+
+### Retrieval beyond the injected index
+
+The session-start hook injects a tiered slice of the index (articles updated
+in the last 14 days + the most-compiled hub articles). Everything else is
+reachable through the `knowledge-base` MCP server:
+
+```bash
+claude mcp add --scope user knowledge-base -- uv run --directory /path/to/this/repo python scripts/mcp_server.py
+```
+
+Tools: `search_knowledge`, `read_article`, `list_articles`, `search_daily_logs`.
+
+### Unattended maintenance (macOS)
+
+`scripts/maintenance.py` drains failed flushes, applies mechanical lint fixes,
+runs the weekly full lint (Sundays), and posts a notification if health is not
+ok. Schedule it with launchd:
+
+```bash
+cp docs/launchd-maintenance.plist ~/Library/LaunchAgents/com.aluarius.memory-compiler-maintenance.plist
+# edit the repo path inside if yours differs, then:
+launchctl load ~/Library/LaunchAgents/com.aluarius.memory-compiler-maintenance.plist
+```
 
 ## What's Different from Upstream
 

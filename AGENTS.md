@@ -70,8 +70,7 @@ knowledge/
 ├── index.md              # Master catalog - every article with one-line summary
 ├── log.md                # Append-only chronological build log
 ├── concepts/             # Atomic knowledge articles
-├── connections/          # Cross-cutting insights linking 2+ concepts
-└── qa/                   # Filed query answers (compounding knowledge)
+└── connections/          # Cross-cutting insights linking 2+ concepts
 ```
 
 ### Layer 3: This File (AGENTS.md)
@@ -110,10 +109,6 @@ Format:
 - Source: daily/2026-04-01.md
 - Articles created: [[concepts/nextjs-project-structure]], [[concepts/tailwind-setup]]
 - Articles updated: (none)
-
-## [2026-04-02T09:00:00] query | "How do I handle auth redirects?"
-- Consulted: [[concepts/supabase-auth]], [[concepts/nextjs-middleware]]
-- Filed to: [[qa/auth-redirect-handling]]
 ```
 
 ---
@@ -194,37 +189,6 @@ updated: 2026-04-04
 - [[concepts/concept-y]]
 ```
 
-### Q&A Articles (`knowledge/qa/`)
-
-Filed answers from queries. Every complex question answered by the system can be permanently stored, making future queries smarter.
-
-```markdown
----
-title: "Q: Original Question"
-question: "The exact question asked"
-consulted:
-  - "concepts/article-1"
-  - "concepts/article-2"
-filed: 2026-04-05
----
-
-# Q: Original Question
-
-## Answer
-
-[The synthesized answer with [[wikilinks]] to sources]
-
-## Sources Consulted
-
-- [[concepts/article-1]] - Relevant because...
-- [[concepts/article-2]] - Provided context on...
-
-## Follow-Up Questions
-
-- What about edge case X?
-- How does this change if Y?
-```
-
 ---
 
 ## Core Operations
@@ -251,13 +215,15 @@ When processing a daily log:
 - Every article must have YAML frontmatter
 - Every article must link back to its source daily logs
 
-### 2. Query (Ask the Knowledge Base)
+### 2. Retrieve (Ask the Knowledge Base)
 
-1. Read `knowledge/index.md` (the master catalog)
-2. Based on the question, identify 3-10 relevant articles from the index
-3. Read those articles in full
-4. Synthesize an answer with `[[wikilink]]` citations
-5. If `--file-back` is specified: create a `knowledge/qa/` article and update index.md and log.md
+Retrieval happens inside any agent session via the `knowledge-base` MCP server
+(`scripts/mcp_server.py`, registered user-scope):
+
+1. The session-start hook injects a tiered index slice (recent + hub articles)
+2. For anything else: `search_knowledge` / `list_articles` find candidates,
+   `read_article` loads them in full
+3. The agent synthesizes the answer with `[[wikilink]]` citations
 
 **Why this works without RAG:** At personal knowledge base scale (50-500 articles), the LLM reading a structured index outperforms cosine similarity. The LLM understands what the question is really asking and selects pages accordingly. Embeddings find similar words; the LLM finds relevant concepts.
 
@@ -325,10 +291,9 @@ llm-personal-kb/
 |   |-- log.md                       #   Append-only build log
 |   |-- concepts/                    #   Atomic knowledge articles
 |   |-- connections/                 #   Cross-cutting insights linking 2+ concepts
-|   |-- qa/                          #   Filed query answers (compounding knowledge)
 |-- scripts/                         # CLI tools
 |   |-- compile.py                   #   Compile daily logs -> knowledge articles
-|   |-- query.py                     #   Ask questions (index-guided, no RAG)
+|   |-- mcp_server.py                #   MCP retrieval tools (search/read, no RAG)
 |   |-- lint.py                      #   Structural and semantic KB checks
 |   |-- health.py                    #   Local operational health summary
 |   |-- flush.py                     #   Extract memories from conversations (background)
@@ -462,19 +427,22 @@ uv run python scripts/compile.py --file daily/2026-04-01.md
 uv run python scripts/compile.py --dry-run
 ```
 
-### query.py - Index-Guided Retrieval
+### mcp_server.py - Retrieval Tools (MCP)
 
-Loads the entire knowledge base into context (index + all articles). No RAG.
+Exposes the knowledge base to any agent session over MCP (stdio). No RAG, no
+API calls — local file I/O only.
 
-At personal KB scale (50-500 articles), the LLM reading a structured index outperforms vector similarity. The LLM understands what you're really asking; cosine similarity just finds similar words.
+At personal KB scale (50-500 articles), the LLM reading a structured index
+outperforms vector similarity. The LLM understands what you're really asking;
+cosine similarity just finds similar words.
 
-**CLI:**
+**Tools:** `search_knowledge(query)`, `read_article(path)`, `list_articles()`,
+`search_daily_logs(query, last_n_days)`
+
+**Register (once):**
 ```bash
-uv run python scripts/query.py "What auth patterns do I use?"
-uv run python scripts/query.py "What's my error handling strategy?" --file-back
+claude mcp add --scope user knowledge-base -- uv run --directory /path/to/repo python scripts/mcp_server.py
 ```
-
-With `--file-back`, creates a Q&A article in `knowledge/qa/` and updates the index and log. This is the compounding loop - every question makes the KB smarter.
 
 ### lint.py - Health Checks
 

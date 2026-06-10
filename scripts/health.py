@@ -320,7 +320,6 @@ def format_report(report: HealthReport, *, max_items: int = 8) -> str:
         "Runtime config",
         f"- flush: {runtimes.get('flush_runtime', 'unknown')}",
         f"- compile: {runtimes.get('compile_runtime', 'unknown')}",
-        f"- query: {runtimes.get('query_runtime', 'unknown')}",
         f"- lint: {runtimes.get('lint_runtime', 'unknown')}",
     ]
 

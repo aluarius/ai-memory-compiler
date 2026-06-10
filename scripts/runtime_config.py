@@ -11,7 +11,6 @@ RUNTIME_CONFIG_FILE = ROOT_DIR / "scripts" / "runtime-config.json"
 DEFAULT_RUNTIME_CONFIG = {
     "flush_runtime": "claude",
     "compile_runtime": "claude",
-    "query_runtime": "claude",
     "lint_runtime": "claude",
     "codex_model": None,
 }

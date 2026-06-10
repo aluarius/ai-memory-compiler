@@ -100,6 +100,10 @@ Read the daily log above and compile it into wiki articles following the schema 
    - Do not add links only to reduce lint counts; every link must help a future reader navigate context
 6. **Update knowledge/index.md** - Add new entries to the table
    - Each entry: `| [[path/slug]] | One-line summary | source-file | {timestamp[:10]} |`
+   - Summary must be <= 200 characters: one line of essence, present state only.
+     When updating an existing row, REWRITE the summary — do not append history.
+   - Keep at most 3 sources in the index row (`first, latest +N more`); the full
+     list lives in the article frontmatter.
 7. **Append to knowledge/log.md** - Add a timestamped entry:
    ```
    ## [{timestamp}] compile | {log_path.name}
@@ -286,6 +290,7 @@ def run_post_compile_lint() -> int:
         apply_fixes,
         check_broken_links,
         check_index_consistency,
+        check_index_hygiene,
         check_missing_backlinks,
         check_orphan_pages,
         check_sparse_articles,
@@ -298,6 +303,7 @@ def run_post_compile_lint() -> int:
         for name, fn in [
             ("Broken links", check_broken_links),
             ("Index consistency", check_index_consistency),
+            ("Index hygiene", check_index_hygiene),
             ("Orphan pages", check_orphan_pages),
             ("Sparse articles", check_sparse_articles),
             ("Weak connectivity", check_weak_connectivity),
@@ -317,8 +323,8 @@ def run_post_compile_lint() -> int:
     if auto_fixable:
         print(f"\n  Auto-fixing {len(auto_fixable)} mechanical issues...")
         counts = apply_fixes(issues)
-        print(f"    Backlinks added: {counts['backlinks_added']}")
-        print(f"    Index rows added: {counts['index_rows_added']}")
+        for key, value in counts.items():
+            print(f"    {key.replace('_', ' ').capitalize()}: {value}")
         if any(counts.values()):
             print("\n  Re-checking after fix...")
             issues = collect()

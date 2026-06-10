@@ -21,7 +21,7 @@ def test_runtime_config_reads_overrides(monkeypatch, tmp_path: Path) -> None:
         json.dumps(
             {
                 "flush_runtime": "codex",
-                "query_runtime": "codex",
+                "lint_runtime": "codex",
                 "codex_model": "gpt-5.4",
             }
         ),
@@ -30,7 +30,7 @@ def test_runtime_config_reads_overrides(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(runtime_config, "RUNTIME_CONFIG_FILE", config_path)
 
     assert runtime_config.get_task_runtime("flush") == "codex"
-    assert runtime_config.get_task_runtime("query") == "codex"
+    assert runtime_config.get_task_runtime("lint") == "codex"
     assert runtime_config.get_codex_model() == "gpt-5.4"
 
 

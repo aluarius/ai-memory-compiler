@@ -173,6 +173,100 @@ def check_missing_backlinks() -> list[dict]:
     return issues
 
 
+MAX_INDEX_SUMMARY_CHARS = 200
+MAX_INDEX_SOURCES = 3
+
+_INDEX_ROW_RE = re.compile(
+    r"^\|\s*\[\[([^\]]+)\]\]\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\|\s*$"
+)
+
+
+def check_index_hygiene() -> list[dict]:
+    """Flag index rows that bloat the index: run-on summaries and source sprawl.
+
+    The session-start hook injects a tiered slice of the index into every
+    conversation; row size directly eats that budget. Summaries should be
+    one line of essence, and long source lists should collapse to
+    'first, latest +N more'.
+    """
+    index_path = KNOWLEDGE_DIR / "index.md"
+    if not index_path.exists():
+        return []
+
+    issues = []
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        m = _INDEX_ROW_RE.match(line.strip())
+        if not m:
+            continue
+        link, summary, sources, _updated = m.groups()
+
+        if len(summary) > MAX_INDEX_SUMMARY_CHARS:
+            issues.append({
+                "severity": "suggestion",
+                "check": "index_hygiene",
+                "subcheck": "long_summary",
+                "file": "index.md",
+                "target": link,
+                "detail": (
+                    f"[[{link}]] index summary is {len(summary)} chars "
+                    f"(max {MAX_INDEX_SUMMARY_CHARS}). Rewrite as one line of essence; "
+                    "history belongs in the article body."
+                ),
+            })
+
+        source_count = sources.count(",") + 1 if sources.strip() else 0
+        if source_count > MAX_INDEX_SOURCES:
+            issues.append({
+                "severity": "suggestion",
+                "check": "index_hygiene",
+                "subcheck": "source_sprawl",
+                "file": "index.md",
+                "target": link,
+                "source_cell": sources,
+                "detail": (
+                    f"[[{link}]] lists {source_count} sources in the index "
+                    f"(max {MAX_INDEX_SOURCES}). Collapse to 'first, latest +N more' "
+                    "(auto-fixable); the full list lives in the article frontmatter."
+                ),
+                "auto_fixable": True,
+            })
+
+    return issues
+
+
+def fix_index_source_sprawl(issues: list[dict]) -> int:
+    """Collapse sprawling source cells to 'first, latest +N more'. Returns rows fixed."""
+    index_path = KNOWLEDGE_DIR / "index.md"
+    if not index_path.exists():
+        return 0
+
+    cells_by_target: dict[str, str] = {
+        i["target"]: i["source_cell"]
+        for i in issues
+        if i.get("check") == "index_hygiene"
+        and i.get("subcheck") == "source_sprawl"
+        and i.get("target")
+        and i.get("source_cell")
+    }
+    if not cells_by_target:
+        return 0
+
+    text = index_path.read_text(encoding="utf-8")
+    fixed = 0
+    for target, cell in cells_by_target.items():
+        parts = [p.strip() for p in cell.split(",") if p.strip()]
+        if len(parts) <= MAX_INDEX_SOURCES:
+            continue
+        collapsed = f"{parts[0]}, {parts[-1]} +{len(parts) - 2} more"
+        new_text = text.replace(f"| {cell} |", f"| {collapsed} |", 1)
+        if new_text != text:
+            text = new_text
+            fixed += 1
+    if fixed:
+        index_path.write_text(text, encoding="utf-8")
+    return fixed
+
+
 def check_sparse_articles() -> list[dict]:
     """Check for articles with fewer than 200 words."""
     issues = []
@@ -478,6 +572,7 @@ def apply_fixes(all_issues: list[dict]) -> dict:
     return {
         "backlinks_added": fix_missing_backlinks(all_issues),
         "index_rows_added": fix_index_consistency(all_issues),
+        "source_cells_collapsed": fix_index_source_sprawl(all_issues),
     }
 
 
@@ -528,6 +623,7 @@ def _run_structural_checks() -> list[dict]:
     checks = [
         ("Broken links", check_broken_links),
         ("Index consistency", check_index_consistency),
+        ("Index hygiene", check_index_hygiene),
         ("Orphan pages", check_orphan_pages),
         ("Orphan sources", check_orphan_sources),
         ("Stale articles", check_stale_articles),
@@ -579,8 +675,8 @@ def main():
     if args.fix:
         print("\nApplying auto-fixes...")
         counts = apply_fixes(all_issues)
-        print(f"  Backlinks added: {counts['backlinks_added']}")
-        print(f"  Index rows added: {counts['index_rows_added']}")
+        for key, value in counts.items():
+            print(f"  {key.replace('_', ' ').capitalize()}: {value}")
         if any(counts.values()):
             print("\nRe-running structural checks after fix...")
             all_issues = _run_structural_checks()
