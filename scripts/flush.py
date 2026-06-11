@@ -470,6 +470,7 @@ def retry_failed_flushes() -> int:
             )
             move_to_permanent(files)
             retry_state.pop(session_id, None)
+            save_retry_state(retry_state)
             continue
 
         context = newest.read_text(encoding="utf-8").strip()
@@ -478,6 +479,7 @@ def retry_failed_flushes() -> int:
             for f in files:
                 f.unlink(missing_ok=True)
             retry_state.pop(session_id, None)
+            save_retry_state(retry_state)
             continue
 
         logging.info(
@@ -497,6 +499,10 @@ def retry_failed_flushes() -> int:
             retry_state[session_id]["last_attempt"] = datetime.now(
                 timezone.utc
             ).astimezone().isoformat(timespec="seconds")
+            # Persist immediately: if this run is killed mid-pass (maintenance
+            # timeout, crash), lost increments would let a never-succeeding
+            # session dodge the permanent limit forever.
+            save_retry_state(retry_state)
             logging.error("retry-failed: session %s still failing: %s", session_id, response[:120])
             continue
 
@@ -515,9 +521,9 @@ def retry_failed_flushes() -> int:
         for f in files:
             f.unlink(missing_ok=True)
         retry_state.pop(session_id, None)
+        save_retry_state(retry_state)
         recovered += 1
 
-    save_retry_state(retry_state)
     return recovered
 
 

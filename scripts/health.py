@@ -194,6 +194,7 @@ def run_structural_checks() -> list[dict[str, Any]]:
     checks = [
         lint.check_broken_links,
         lint.check_index_consistency,
+        lint.check_index_hygiene,
         lint.check_orphan_pages,
         lint.check_orphan_sources,
         lint.check_stale_articles,
@@ -222,6 +223,7 @@ def _overall_status(
     *,
     issue_counts: IssueCounts,
     failed_flush_count: int,
+    permanent_failed_count: int,
     pending_flush_count: int,
     uncompiled_count: int,
     stale_count: int,
@@ -230,6 +232,9 @@ def _overall_status(
     if issue_counts.errors > 0:
         return "unhealthy"
     if failed_flush_count or pending_flush_count or uncompiled_count or stale_count:
+        return "attention"
+    if permanent_failed_count:
+        # Exceeded retry limits — these never resolve without manual triage.
         return "attention"
     if compile_status == "failed":
         return "attention"
@@ -241,6 +246,7 @@ def collect_health() -> HealthReport:
     issues = run_structural_checks()
     issue_counts = _issue_counts(issues)
     failed_flushes = _failed_flush_contexts()
+    permanent_failed = _permanent_failed_contexts()
     pending_flushes = _pending_flush_contexts()
     uncompiled = _uncompiled_daily_logs(state)
     stale = _stale_daily_logs(state)
@@ -250,6 +256,7 @@ def collect_health() -> HealthReport:
     status = _overall_status(
         issue_counts=issue_counts,
         failed_flush_count=len(failed_flushes),
+        permanent_failed_count=len(permanent_failed),
         pending_flush_count=len(pending_flushes),
         uncompiled_count=len(uncompiled),
         stale_count=len(stale),
@@ -265,7 +272,7 @@ def collect_health() -> HealthReport:
         uncompiled_daily_logs=uncompiled,
         stale_daily_logs=stale,
         failed_flush_contexts=_relative_names(failed_flushes, REPORTS_DIR),
-        permanent_failed_contexts=_relative_names(_permanent_failed_contexts(), REPORTS_DIR),
+        permanent_failed_contexts=_relative_names(permanent_failed, REPORTS_DIR),
         pending_flush_contexts=_relative_names(pending_flushes, SCRIPTS_DIR),
         last_compile=last_compile,
         last_flush_line=_last_flush_line(_tail_lines(FLUSH_LOG_FILE, limit=50)),

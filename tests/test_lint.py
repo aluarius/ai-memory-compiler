@@ -88,11 +88,9 @@ def test_fix_index_source_sprawl_collapses_to_first_latest_count(
     assert fixed == 1
     content = (knowledge_dir / "index.md").read_text(encoding="utf-8")
     assert "| daily/a.md, daily/e.md +3 more |" in content
-    # Re-check is clean now
-    monkeypatch.setattr(lint, "KNOWLEDGE_DIR", knowledge_dir)
-    assert lint.check_index_hygiene() == [
-        i for i in lint.check_index_hygiene() if i["subcheck"] != "source_sprawl"
-    ]
+    # Re-check finds no sprawl after the fix
+    remaining = [i for i in lint.check_index_hygiene() if i["subcheck"] == "source_sprawl"]
+    assert remaining == []
 
 
 def test_fix_index_source_sprawl_noop_on_clean_index(monkeypatch, tmp_path: Path) -> None:

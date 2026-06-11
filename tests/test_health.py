@@ -61,7 +61,6 @@ def test_collect_health_reports_attention_items(monkeypatch, tmp_path: Path) -> 
         lambda: {
             "flush_runtime": "claude",
             "compile_runtime": "claude",
-            "query_runtime": "claude",
             "lint_runtime": "claude",
         },
     )
@@ -100,7 +99,6 @@ def test_format_report_includes_actionable_sections() -> None:
         runtime_config={
             "flush_runtime": "claude",
             "compile_runtime": "claude",
-            "query_runtime": "claude",
             "lint_runtime": "claude",
         },
     )
@@ -156,3 +154,31 @@ def test_exit_code_fails_structural_errors_without_strict_mode() -> None:
     )
 
     assert health.exit_code(report, strict=False) == 2
+
+
+def test_overall_status_attention_when_only_permanent_failures_exist() -> None:
+    counts = health.IssueCounts(total=0, errors=0, warnings=0, suggestions=0)
+    status = health._overall_status(
+        issue_counts=counts,
+        failed_flush_count=0,
+        permanent_failed_count=2,
+        pending_flush_count=0,
+        uncompiled_count=0,
+        stale_count=0,
+        compile_status="complete",
+    )
+    assert status == "attention"
+
+
+def test_overall_status_ok_when_nothing_pending() -> None:
+    counts = health.IssueCounts(total=0, errors=0, warnings=0, suggestions=0)
+    status = health._overall_status(
+        issue_counts=counts,
+        failed_flush_count=0,
+        permanent_failed_count=0,
+        pending_flush_count=0,
+        uncompiled_count=0,
+        stale_count=0,
+        compile_status="complete",
+    )
+    assert status == "ok"

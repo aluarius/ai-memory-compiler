@@ -90,7 +90,13 @@ def main(argv: list[str] | None = None) -> int:
 
     uv = ["uv", "run", "--directory", str(ROOT), "python"]
 
-    run_step("retry-failed", uv + [str(SCRIPTS_DIR / "flush.py"), "--retry-failed"])
+    # A large backlog drains at ~20-30s per context (live run: 55 contexts in
+    # ~25 min), so this step gets a bigger budget than the default.
+    run_step(
+        "retry-failed",
+        uv + [str(SCRIPTS_DIR / "flush.py"), "--retry-failed"],
+        timeout=60 * 60,
+    )
     run_step("lint-fix", uv + [str(SCRIPTS_DIR / "lint.py"), "--fix"])
 
     if args.full_lint or now.weekday() == WEEKLY_FULL_LINT_WEEKDAY:
