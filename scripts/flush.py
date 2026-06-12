@@ -27,7 +27,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from codex_exec import run_codex_prompt
-from config import DAILY_LOG_LOCK_FILE
+from config import DAILY_LOG_LOCK_FILE, LLM_LOCK_FILE
 from locking import file_lock
 from runtime_config import get_codex_model, get_task_runtime
 from session_utils import SessionMetadata, format_session_header
@@ -39,11 +39,11 @@ REPORTS_DIR = ROOT / "reports"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
 STATE_LOCK_FILE = SCRIPTS_DIR / ".locks" / "flush-state.lock"
-# Serializes LLM calls across flush processes. Concurrent bundled-CLI
-# instances crash each other (observed: bursts of codex imports →
-# simultaneous exit-1 failures at 01:46:02/:04/:26; the same contexts
-# flush fine when run alone).
-LLM_LOCK_FILE = SCRIPTS_DIR / ".locks" / "flush-llm.lock"
+# LLM_LOCK_FILE (imported from config) serializes LLM calls across ALL
+# pipeline processes (flush, compile, lint). Concurrent bundled-CLI instances
+# crash each other: bursts of codex imports → simultaneous exit-1 failures at
+# 01:46:02/:04/:26; a backlog compile died the same way while evening flushes
+# were firing.
 RUNTIME_EVENTS_FILE = REPORTS_DIR / "runtime-events.md"
 RUNTIME_EVENTS_LOCK_FILE = SCRIPTS_DIR / ".locks" / "runtime-events.lock"
 LOG_FILE = SCRIPTS_DIR / "flush.log"

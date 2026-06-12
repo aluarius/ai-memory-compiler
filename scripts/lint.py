@@ -18,7 +18,8 @@ import re
 from pathlib import Path
 
 from codex_exec import run_codex_prompt
-from config import KNOWLEDGE_DIR, REPORTS_DIR, now_iso, today_iso
+from config import KNOWLEDGE_DIR, LLM_LOCK_FILE, REPORTS_DIR, now_iso, today_iso
+from locking import file_lock
 from runtime_config import get_codex_model, get_task_runtime
 from utils import (
     count_inbound_links,
@@ -358,34 +359,37 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
     response = ""
     runtime = get_task_runtime("lint")
     try:
-        if runtime == "codex":
-            response = await asyncio.to_thread(
-                run_codex_prompt,
-                prompt,
-                cwd=ROOT_DIR,
-                allow_edits=False,
-                model=get_codex_model(),
-            )
-        else:
-            from claude_agent_sdk import (
-                AssistantMessage,
-                ClaudeAgentOptions,
-                TextBlock,
-                query,
-            )
+        # Serialize against flush/compile LLM calls — concurrent bundled-CLI
+        # instances crash each other with exit 1.
+        with file_lock(LLM_LOCK_FILE):
+            if runtime == "codex":
+                response = await asyncio.to_thread(
+                    run_codex_prompt,
+                    prompt,
+                    cwd=ROOT_DIR,
+                    allow_edits=False,
+                    model=get_codex_model(),
+                )
+            else:
+                from claude_agent_sdk import (
+                    AssistantMessage,
+                    ClaudeAgentOptions,
+                    TextBlock,
+                    query,
+                )
 
-            async for message in query(
-                prompt=prompt,
-                options=ClaudeAgentOptions(
-                    cwd=str(ROOT_DIR),
-                    allowed_tools=[],
-                    max_turns=2,
-                ),
-            ):
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            response += block.text
+                async for message in query(
+                    prompt=prompt,
+                    options=ClaudeAgentOptions(
+                        cwd=str(ROOT_DIR),
+                        allowed_tools=[],
+                        max_turns=2,
+                    ),
+                ):
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                response += block.text
     except Exception as e:
         return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": f"LLM check failed: {e}"}]
 

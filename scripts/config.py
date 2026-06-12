@@ -15,6 +15,9 @@ REPORTS_DIR = ROOT_DIR / "reports"
 SCRIPTS_DIR = ROOT_DIR / "scripts"
 LOCKS_DIR = SCRIPTS_DIR / ".locks"
 DAILY_LOG_LOCK_FILE = LOCKS_DIR / "daily-log.lock"
+# Serializes ALL bundled-CLI / LLM calls across processes (flush, compile,
+# lint contradictions). Concurrent instances crash each other with exit 1.
+LLM_LOCK_FILE = LOCKS_DIR / "flush-llm.lock"
 HOOKS_DIR = ROOT_DIR / "hooks"
 AGENTS_FILE = ROOT_DIR / "AGENTS.md"
 

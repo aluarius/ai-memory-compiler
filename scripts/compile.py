@@ -26,6 +26,7 @@ from config import (
     DAILY_DIR,
     DAILY_LOG_LOCK_FILE,
     KNOWLEDGE_DIR,
+    LLM_LOCK_FILE,
     LOCKS_DIR,
     now_iso,
 )
@@ -134,48 +135,53 @@ Read the daily log above and compile it into wiki articles following the schema 
     runtime = get_task_runtime("compile")
     print(f"  Runtime: {runtime}")
 
-    if runtime == "codex":
-        try:
-            await asyncio.to_thread(
-                run_codex_prompt,
-                prompt,
-                cwd=ROOT_DIR,
-                allow_edits=True,
-                model=get_codex_model(),
+    # Serialize against flush/lint LLM calls: concurrent bundled-CLI instances
+    # crash each other with exit 1 (a backlog compile died exactly this way
+    # while evening session-end flushes were firing). Held for the whole
+    # compile of one log — queued flushes wait, which beats crashing.
+    with file_lock(LLM_LOCK_FILE):
+        if runtime == "codex":
+            try:
+                await asyncio.to_thread(
+                    run_codex_prompt,
+                    prompt,
+                    cwd=ROOT_DIR,
+                    allow_edits=True,
+                    model=get_codex_model(),
+                )
+            except Exception as e:
+                print(f"  Error: {e}")
+                return None
+        else:
+            from claude_agent_sdk import (
+                AssistantMessage,
+                ClaudeAgentOptions,
+                ResultMessage,
+                TextBlock,
+                query,
             )
-        except Exception as e:
-            print(f"  Error: {e}")
-            return None
-    else:
-        from claude_agent_sdk import (
-            AssistantMessage,
-            ClaudeAgentOptions,
-            ResultMessage,
-            TextBlock,
-            query,
-        )
 
-        try:
-            async for message in query(
-                prompt=prompt,
-                options=ClaudeAgentOptions(
-                    cwd=str(ROOT_DIR),
-                    system_prompt={"type": "preset", "preset": "claude_code"},
-                    allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
-                    permission_mode="acceptEdits",
-                    max_turns=30,
-                ),
-            ):
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            pass
-                elif isinstance(message, ResultMessage):
-                    cost = message.total_cost_usd or 0.0
-                    print(f"  Cost: ${cost:.4f}")
-        except Exception as e:
-            print(f"  Error: {e}")
-            return None
+            try:
+                async for message in query(
+                    prompt=prompt,
+                    options=ClaudeAgentOptions(
+                        cwd=str(ROOT_DIR),
+                        system_prompt={"type": "preset", "preset": "claude_code"},
+                        allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
+                        permission_mode="acceptEdits",
+                        max_turns=30,
+                    ),
+                ):
+                    if isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                pass
+                    elif isinstance(message, ResultMessage):
+                        cost = message.total_cost_usd or 0.0
+                        print(f"  Cost: ${cost:.4f}")
+            except Exception as e:
+                print(f"  Error: {e}")
+                return None
 
     # Update state
     rel_path = log_path.name
