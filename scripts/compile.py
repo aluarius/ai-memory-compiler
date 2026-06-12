@@ -206,6 +206,11 @@ def main():
     parser.add_argument("--all", action="store_true", help="Force recompile all logs")
     parser.add_argument("--file", type=str, help="Compile a specific daily log file")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be compiled")
+    parser.add_argument(
+        "--skip-today",
+        action="store_true",
+        help="Exclude today's still-growing log (for daytime backlog compiles)",
+    )
     args = parser.parse_args()
 
     with file_lock(LOCKS_DIR / "compile.lock"):
@@ -234,6 +239,12 @@ def main():
                     prev = state.get("ingested", {}).get(rel, {})
                     if not prev or prev.get("hash") != file_hash(log_path):
                         to_compile.append(log_path)
+
+        if args.skip_today:
+            from datetime import datetime, timezone
+
+            today_name = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d") + ".md"
+            to_compile = [p for p in to_compile if p.name != today_name]
 
         if not to_compile:
             print("Nothing to compile - all daily logs are up to date.")

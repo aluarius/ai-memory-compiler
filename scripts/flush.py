@@ -39,6 +39,11 @@ REPORTS_DIR = ROOT / "reports"
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_FILE = SCRIPTS_DIR / "last-flush.json"
 STATE_LOCK_FILE = SCRIPTS_DIR / ".locks" / "flush-state.lock"
+# Serializes LLM calls across flush processes. Concurrent bundled-CLI
+# instances crash each other (observed: bursts of codex imports →
+# simultaneous exit-1 failures at 01:46:02/:04/:26; the same contexts
+# flush fine when run alone).
+LLM_LOCK_FILE = SCRIPTS_DIR / ".locks" / "flush-llm.lock"
 RUNTIME_EVENTS_FILE = REPORTS_DIR / "runtime-events.md"
 RUNTIME_EVENTS_LOCK_FILE = SCRIPTS_DIR / ".locks" / "runtime-events.lock"
 LOG_FILE = SCRIPTS_DIR / "flush.log"
@@ -58,6 +63,11 @@ logging.basicConfig(
 # not seconds, so a couple of quick retries plus one patient one.
 RETRY_DELAYS = (3, 30, 180)  # seconds between attempts; total attempts = len + 1
 MAX_FAILED_RETRIES = 3  # --retry-failed attempts before a context goes permanent
+# Don't re-attempt the same failed session more often than this. Without it,
+# a burst of successful flushes (each running the opportunistic drain) could
+# burn through all MAX_FAILED_RETRIES within minutes and send a session to
+# permanent/ during a single transient outage.
+RETRY_COOLDOWN_SECONDS = 6 * 3600
 COMPILE_AFTER_HOUR = 22  # 10 PM local time
 TEMP_MAX_AGE = 3600  # 1 hour
 DEDUP_WINDOW_SECONDS = 120
@@ -133,9 +143,21 @@ def append_runtime_event(kind: str, message: str, metadata: SessionMetadata) -> 
 
 
 def preserve_failed_context(context_file: Path) -> Path | None:
-    """Move a failed flush context aside so it can be retried or inspected later."""
+    """Move a failed flush context aside so it can be retried or inspected later.
+
+    Long-lived sessions re-import every turn; if their flushes keep failing,
+    each failure used to add another timestamped copy (observed: 5 copies of
+    one session within an hour). Keep only the newest context per session —
+    it supersedes the older snapshots of the same transcript.
+    """
     try:
         FAILED_FLUSH_DIR.mkdir(parents=True, exist_ok=True)
+
+        session_id = extract_session_id(context_file.name)
+        if session_id:
+            for stale in FAILED_FLUSH_DIR.glob(f"*{session_id}*.md"):
+                stale.unlink(missing_ok=True)
+
         destination = FAILED_FLUSH_DIR / context_file.name
         if destination.exists():
             timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
@@ -298,50 +320,84 @@ async def run_flush(context: str) -> str:
         runtime = get_task_runtime("flush")
         logging.info("Flush runtime: %s", runtime)
 
-        if runtime == "codex":
-            response = await asyncio.to_thread(
-                run_codex_prompt,
-                prompt,
-                cwd=ROOT,
-                allow_edits=False,
-                model=get_codex_model(),
-            )
-            return clean_flush_response(response)
+        # One LLM call at a time across all flush processes — see LLM_LOCK_FILE.
+        # Blocking is fine: a queued flush waits ~30s for the one ahead of it.
+        with file_lock(LLM_LOCK_FILE):
+            if runtime == "codex":
+                response = await asyncio.to_thread(
+                    run_codex_prompt,
+                    prompt,
+                    cwd=ROOT,
+                    allow_edits=False,
+                    model=get_codex_model(),
+                )
+                return clean_flush_response(response)
 
-        return clean_flush_response(await run_flush_claude(prompt))
+            return clean_flush_response(await run_flush_claude(prompt))
     except Exception as e:
         logging.exception("Flush runtime failed")
         return f"FLUSH_ERROR: {type(e).__name__}: {e}"
 
 
+def _has_stale_past_logs(ingested: dict, today_log: str) -> bool:
+    """True if any daily log OLDER than today is uncompiled or changed."""
+    for log_path in sorted(DAILY_DIR.glob("*.md")):
+        if log_path.name >= today_log:
+            continue
+        prev = ingested.get(log_path.name)
+        if not prev or prev.get("hash") != file_hash(log_path):
+            return True
+    return False
+
+
 def maybe_trigger_compilation() -> None:
-    """If it's past the compile hour and today's log hasn't been compiled, run compile.py."""
+    """Trigger compile.py when there is finished material to compile.
+
+    Two paths:
+    - After COMPILE_AFTER_HOUR: today's log is considered final → full compile
+      (original end-of-day behavior).
+    - Any time of day: logs from PAST days pending (the 22:00 gate misses
+      days when the last session ends early — observed 3-day backlog) →
+      compile with --skip-today so the still-growing log isn't churned.
+    """
     import subprocess as _sp
 
     now = datetime.now(timezone.utc).astimezone()
-    if now.hour < COMPILE_AFTER_HOUR:
-        return
-
     today_log = f"{now.strftime('%Y-%m-%d')}.md"
+
+    ingested: dict = {}
     compile_state_file = SCRIPTS_DIR / "state.json"
     if compile_state_file.exists():
         try:
             compile_state = json.loads(compile_state_file.read_text(encoding="utf-8"))
             ingested = compile_state.get("ingested", {})
-            if today_log in ingested:
-                log_path = DAILY_DIR / today_log
-                if log_path.exists() and ingested[today_log].get("hash") == file_hash(log_path):
-                    return
         except (json.JSONDecodeError, OSError):
             pass
+
+    skip_today = False
+    if now.hour >= COMPILE_AFTER_HOUR:
+        if today_log in ingested:
+            log_path = DAILY_DIR / today_log
+            if log_path.exists() and ingested[today_log].get("hash") == file_hash(log_path):
+                if not _has_stale_past_logs(ingested, today_log):
+                    return
+    else:
+        if not _has_stale_past_logs(ingested, today_log):
+            return
+        skip_today = True
 
     compile_script = SCRIPTS_DIR / "compile.py"
     if not compile_script.exists():
         return
 
-    logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
+    if skip_today:
+        logging.info("Daytime backlog compilation triggered (past-day logs pending)")
+    else:
+        logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
 
     cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
+    if skip_today:
+        cmd.append("--skip-today")
 
     kwargs: dict = {}
     if sys.platform == "win32":
@@ -445,8 +501,27 @@ def move_to_permanent(files: list[Path]) -> None:
             logging.exception("retry-failed: could not move %s to permanent", f.name)
 
 
-def retry_failed_flushes() -> int:
-    """Drain reports/failed-flushes/. Returns count of successfully recovered sessions."""
+def _in_retry_cooldown(entry: dict, now: datetime) -> bool:
+    """True if this session was attempted within RETRY_COOLDOWN_SECONDS."""
+    last_attempt = entry.get("last_attempt")
+    if not last_attempt:
+        return False
+    try:
+        last_dt = datetime.fromisoformat(last_attempt)
+    except ValueError:
+        return False
+    return (now - last_dt).total_seconds() < RETRY_COOLDOWN_SECONDS
+
+
+def retry_failed_flushes(limit: int | None = None, force: bool = False) -> int:
+    """Drain reports/failed-flushes/. Returns count of successfully recovered sessions.
+
+    With `limit`, processes at most that many sessions (plain sorted order,
+    deterministic). Used by the opportunistic post-flush drain to bound runtime.
+
+    Sessions attempted within RETRY_COOLDOWN_SECONDS are skipped unless
+    `force` is set (the manual CLI invocation forces; automated paths don't).
+    """
     groups = group_failed_contexts()
     if not groups:
         logging.info("retry-failed: nothing to retry")
@@ -454,13 +529,24 @@ def retry_failed_flushes() -> int:
 
     retry_state = load_retry_state()
     recovered = 0
+    processed = 0
+    now = datetime.now(timezone.utc).astimezone()
 
     for session_id, files in sorted(groups.items()):
+        if limit is not None and processed >= limit:
+            break
+
+        state_entry = retry_state.get(session_id, {})
+        if not force and _in_retry_cooldown(state_entry, now):
+            logging.info("retry-failed: session %s in cooldown, skipping", session_id)
+            continue
+
+        processed += 1
         files.sort(key=lambda f: f.stat().st_mtime)
         newest = files[-1]
         duplicates = files[:-1]
 
-        attempts = retry_state.get(session_id, {}).get("attempts", 0)
+        attempts = state_entry.get("attempts", 0)
         if attempts >= MAX_FAILED_RETRIES:
             logging.warning(
                 "retry-failed: session %s exceeded %d retries, moving %d file(s) to permanent",
@@ -551,7 +637,8 @@ def main() -> None:
     args = parse_args()
 
     if args.retry_failed:
-        recovered = retry_failed_flushes()
+        # Manual invocation: the user wants retries now — bypass the cooldown.
+        recovered = retry_failed_flushes(force=True)
         logging.info("retry-failed: done, %d session(s) recovered", recovered)
         print(f"Recovered {recovered} failed flush session(s)")
         return
@@ -614,6 +701,15 @@ def main() -> None:
         remember_flush(metadata.session_id, context_hash)
         context_file.unlink(missing_ok=True)
         maybe_trigger_compilation()
+        # Opportunistic drain: this environment just proved the SDK works
+        # (keychain unlocked, no outage), which the 04:30 launchd pass can't
+        # guarantee. Bounded so a backlog never delays the hook pipeline.
+        try:
+            drained = retry_failed_flushes(limit=2)
+            if drained:
+                logging.info("Opportunistic drain recovered %d session(s)", drained)
+        except Exception:
+            logging.exception("Opportunistic drain failed")
 
     if flush_failed:
         logging.error("Flush failed for session %s", metadata.session_id)

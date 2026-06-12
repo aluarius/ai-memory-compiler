@@ -13,6 +13,8 @@
         <string>python</string>
         <string>scripts/maintenance.py</string>
     </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/exmac/Desktop/ideas/claude-memory-compiler</string>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>

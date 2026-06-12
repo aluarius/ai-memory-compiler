@@ -145,8 +145,10 @@ Session ends -> hook captures transcript -> sanitize secrets -> flush.py extract
       -> anything deeper -> knowledge-base MCP tools (search_knowledge, read_article)
 ```
 
-- **flush.py** — decides what's worth saving (runs after every session, retries on failures)
-- **compile.py** — compiles daily logs into structured wiki articles (auto-triggers after 10 PM)
+- **flush.py** — decides what's worth saving (runs after every session; serialized LLM calls,
+  backoff retries, failed contexts auto-recovered later — see docs/operations.md)
+- **compile.py** — compiles daily logs into wiki articles (full compile after 10 PM,
+  daytime backlog compile of past days via --skip-today)
 - **Sensitive data** (API keys, tokens, passwords) is redacted before anything is saved
 - **Old logs** are archived after 30 days
 

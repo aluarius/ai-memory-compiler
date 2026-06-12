@@ -33,7 +33,11 @@ KNOWLEDGE_DIR = ROOT / "knowledge"
 DAILY_DIR = ROOT / "daily"
 INDEX_FILE = KNOWLEDGE_DIR / "index.md"
 
-MAX_CONTEXT_CHARS = 20_000
+# Claude Code persists hook outputs larger than ~10KB to a file instead of
+# inlining them (the model then sees only a 2KB preview + path). Observed on
+# 19.4-19.5KB payloads across multiple sessions. Stay under that threshold —
+# an inline 9.5KB beats a persisted 20KB.
+MAX_CONTEXT_CHARS = 9_500
 MAX_LOG_LINES = 30
 RECENT_DAYS = 14
 MAX_HUB_ROWS = 15

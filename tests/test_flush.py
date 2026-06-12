@@ -204,15 +204,16 @@ def test_retry_failed_increments_attempts_then_moves_to_permanent(
 
     monkeypatch.setattr(flush, "run_flush", fail_flush)
 
+    # force=True models the nightly maintenance cadence (24h apart, no cooldown)
     for expected_attempts in (1, 2, 3):
-        recovered = flush.retry_failed_flushes()
+        recovered = flush.retry_failed_flushes(force=True)
         assert recovered == 0
         state = flush.load_retry_state()
         assert state[UUID_B]["attempts"] == expected_attempts
         assert f.exists()
 
     # Fourth run: over the limit — moved to permanent, state cleared.
-    recovered = flush.retry_failed_flushes()
+    recovered = flush.retry_failed_flushes(force=True)
     assert recovered == 0
     assert not f.exists()
     assert (failed_dir / "permanent" / f.name).exists()
@@ -236,3 +237,102 @@ def test_retry_failed_skips_unparseable_and_empty_files(tmp_path, monkeypatch) -
     assert recovered == 0
     assert unparseable.exists()  # left for manual inspection
     assert not empty.exists()  # dropped
+
+
+def test_preserve_failed_context_replaces_older_copies_of_same_session(
+    tmp_path, monkeypatch
+) -> None:
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    monkeypatch.setattr(flush, "FAILED_FLUSH_DIR", failed_dir)
+
+    old_copy = failed_dir / f"import-flush-{UUID_A}-20260606-004107.md"
+    old_copy.write_text("old snapshot", encoding="utf-8")
+
+    fresh = tmp_path / f"import-flush-{UUID_A}-20260612-120000.md"
+    fresh.write_text("newest snapshot", encoding="utf-8")
+
+    preserved = flush.preserve_failed_context(fresh)
+
+    assert preserved is not None
+    assert not old_copy.exists()  # superseded copy removed
+    remaining = list(failed_dir.glob("*.md"))
+    assert len(remaining) == 1
+    assert remaining[0].read_text(encoding="utf-8") == "newest snapshot"
+
+
+def test_retry_failed_respects_limit(tmp_path, monkeypatch) -> None:
+    failed_dir = _setup_failed_dir(tmp_path, monkeypatch)
+    a = failed_dir / f"session-flush-{UUID_A}.md"
+    b = failed_dir / f"session-flush-{UUID_B}.md"
+    a.write_text("content a", encoding="utf-8")
+    b.write_text("content b", encoding="utf-8")
+
+    calls = []
+
+    async def fake_flush(context: str) -> str:
+        calls.append(context)
+        return "FLUSH_OK"
+
+    monkeypatch.setattr(flush, "run_flush", fake_flush)
+
+    recovered = flush.retry_failed_flushes(limit=1)
+
+    assert recovered == 1
+    assert len(calls) == 1
+    # Exactly one of the two contexts remains for the next pass
+    assert len(list(failed_dir.glob("session-flush-*.md"))) == 1
+
+
+def test_has_stale_past_logs_ignores_today(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(flush, "DAILY_DIR", tmp_path)
+    (tmp_path / "2026-06-10.md").write_text("old", encoding="utf-8")
+    (tmp_path / "2026-06-12.md").write_text("today", encoding="utf-8")
+
+    ingested = {}  # nothing compiled
+    assert flush._has_stale_past_logs(ingested, "2026-06-12.md") is True
+
+    # Past log compiled with matching hash, today still uncompiled -> no backlog
+    from utils import file_hash as fh
+    ingested = {"2026-06-10.md": {"hash": fh(tmp_path / "2026-06-10.md")}}
+    assert flush._has_stale_past_logs(ingested, "2026-06-12.md") is False
+
+
+def test_retry_failed_skips_sessions_in_cooldown_unless_forced(
+    tmp_path, monkeypatch
+) -> None:
+    from datetime import datetime, timezone
+
+    failed_dir = _setup_failed_dir(tmp_path, monkeypatch)
+    f = failed_dir / f"session-flush-{UUID_A}.md"
+    f.write_text("content", encoding="utf-8")
+
+    # Mark a recent attempt (now) in retry state
+    flush.save_retry_state(
+        {
+            UUID_A: {
+                "attempts": 1,
+                "last_attempt": datetime.now(timezone.utc).astimezone().isoformat(
+                    timespec="seconds"
+                ),
+            }
+        }
+    )
+
+    calls = []
+
+    async def fake_flush(context: str) -> str:
+        calls.append(context)
+        return "FLUSH_OK"
+
+    monkeypatch.setattr(flush, "run_flush", fake_flush)
+
+    # Cooldown active: skipped
+    assert flush.retry_failed_flushes() == 0
+    assert calls == []
+    assert f.exists()
+
+    # Forced: retried
+    assert flush.retry_failed_flushes(force=True) == 1
+    assert len(calls) == 1
+    assert not f.exists()

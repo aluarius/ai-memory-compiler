@@ -373,11 +373,19 @@ This ensures flush.py survives after Claude Code's hook process exits.
 1. Sets `CLAUDE_INVOKED_BY=memory_flush` env var (prevents recursive hook firing)
 2. Reads the pre-extracted conversation context from the temp `.md` file
 3. Skips if context is empty or if same session+content was flushed within 120 seconds (deduplication)
-4. Calls Claude Agent SDK (`query()` with `allowed_tools=[]`, `max_turns=2`)
+4. Calls Claude Agent SDK (`query()` with `allowed_tools=[]`, `max_turns=2`), serialized
+   across processes via `scripts/.locks/flush-llm.lock` (concurrent bundled-CLI instances
+   crash each other) and retried up to 4 times with 3s/30s/180s backoff
 5. Claude decides what's worth saving - returns structured bullet points or `FLUSH_OK`
-6. Appends result to `daily/YYYY-MM-DD.md`
+6. Appends result to `daily/YYYY-MM-DD.md`; on persistent failure the context is
+   preserved in `reports/failed-flushes/` (newest snapshot per session) for the
+   retry lifecycle (opportunistic post-flush drain, nightly maintenance drain,
+   permanent quarantine after 3 attempts — see docs/operations.md)
 7. Cleans up temp context file
-8. **End-of-day auto-compilation:** If it's past 10 PM local time (`COMPILE_AFTER_HOUR = 22`) and today's daily log has changed since its last compilation (hash comparison against `state.json`), spawns `compile.py` as another detached background process. This means compilation happens automatically once a day without needing a cron job or manual trigger.
+8. **Auto-compilation:** after 10 PM local time (`COMPILE_AFTER_HOUR = 22`) a successful
+   flush triggers a full compile; during the day a successful flush triggers
+   `compile.py --skip-today` whenever logs from past days are pending, so days whose
+   last session ended before 22:00 still get compiled without a cron job.
 
 ### JSONL Transcript Format
 
