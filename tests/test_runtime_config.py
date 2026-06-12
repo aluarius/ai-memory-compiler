@@ -58,3 +58,19 @@ def test_build_codex_command_uses_expected_mode() -> None:
     assert "workspace-write" in cmd
     assert "-m" in cmd
     assert cmd[-1] == "Hello"
+
+
+def test_get_claude_model_default_and_override(monkeypatch, tmp_path: Path) -> None:
+    # No config file -> default pin
+    monkeypatch.setattr(runtime_config, "RUNTIME_CONFIG_FILE", tmp_path / "missing.json")
+    assert runtime_config.get_claude_model() == "claude-opus-4-8"
+
+    # Override respected
+    config_path = tmp_path / "runtime-config.json"
+    config_path.write_text(json.dumps({"claude_model": "claude-sonnet-4-6"}), encoding="utf-8")
+    monkeypatch.setattr(runtime_config, "RUNTIME_CONFIG_FILE", config_path)
+    assert runtime_config.get_claude_model() == "claude-sonnet-4-6"
+
+    # Explicit null falls back to default
+    config_path.write_text(json.dumps({"claude_model": None}), encoding="utf-8")
+    assert runtime_config.get_claude_model() == "claude-opus-4-8"

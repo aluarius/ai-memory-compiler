@@ -20,7 +20,7 @@ from pathlib import Path
 from codex_exec import run_codex_prompt
 from config import KNOWLEDGE_DIR, LLM_LOCK_FILE, REPORTS_DIR, now_iso, today_iso
 from locking import file_lock
-from runtime_config import get_codex_model, get_task_runtime
+from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from utils import (
     count_inbound_links,
     daily_source_exists,
@@ -382,6 +382,7 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
                     prompt=prompt,
                     options=ClaudeAgentOptions(
                         cwd=str(ROOT_DIR),
+                        model=get_claude_model(),
                         allowed_tools=[],
                         max_turns=2,
                     ),

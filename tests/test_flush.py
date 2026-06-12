@@ -7,7 +7,12 @@ from pathlib import Path
 import flush
 
 
-def test_run_flush_returns_flush_error_when_codex_runtime_fails(monkeypatch) -> None:
+def test_run_flush_returns_flush_error_when_codex_runtime_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Use an isolated lock file: run_flush acquires the global LLM lock, and
+    # grabbing the production one makes tests hang behind a live compile.
+    monkeypatch.setattr(flush, "LLM_LOCK_FILE", tmp_path / "llm.lock")
     monkeypatch.setattr(flush, "get_task_runtime", lambda _: "codex")
     monkeypatch.setattr(flush, "get_codex_model", lambda: "gpt-5.4")
 

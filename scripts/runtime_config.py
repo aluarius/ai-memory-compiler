@@ -13,6 +13,10 @@ DEFAULT_RUNTIME_CONFIG = {
     "compile_runtime": "claude",
     "lint_runtime": "claude",
     "codex_model": None,
+    # Explicit model for claude-runtime LLM calls. Without it the bundled CLI
+    # inherits the user's interactive default (e.g. Fable 5 after /model),
+    # silently changing pipeline cost/behavior.
+    "claude_model": "claude-opus-4-8",
 }
 
 VALID_RUNTIMES = {"claude", "codex"}
@@ -47,3 +51,9 @@ def get_codex_model() -> str | None:
     config = load_runtime_config()
     model = config.get("codex_model")
     return str(model) if model else None
+
+
+def get_claude_model() -> str:
+    config = load_runtime_config()
+    model = config.get("claude_model") or DEFAULT_RUNTIME_CONFIG["claude_model"]
+    return str(model)

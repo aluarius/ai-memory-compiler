@@ -29,7 +29,7 @@ from pathlib import Path
 from codex_exec import run_codex_prompt
 from config import DAILY_LOG_LOCK_FILE, LLM_LOCK_FILE
 from locking import file_lock
-from runtime_config import get_codex_model, get_task_runtime
+from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from session_utils import SessionMetadata, format_session_header
 from utils import file_hash
 
@@ -282,6 +282,7 @@ async def run_flush_claude(prompt: str) -> str:
                 prompt=prompt,
                 options=ClaudeAgentOptions(
                     cwd=str(ROOT),
+                    model=get_claude_model(),
                     allowed_tools=[],
                     max_turns=2,
                     stderr=capture_stderr,
@@ -328,7 +329,8 @@ async def run_flush(context: str) -> str:
     prompt = build_flush_prompt(context)
     try:
         runtime = get_task_runtime("flush")
-        logging.info("Flush runtime: %s", runtime)
+        model = get_codex_model() if runtime == "codex" else get_claude_model()
+        logging.info("Flush runtime: %s (model: %s)", runtime, model or "default")
 
         # One LLM call at a time across all flush processes — see LLM_LOCK_FILE.
         # Blocking is fine: a queued flush waits ~30s for the one ahead of it.
