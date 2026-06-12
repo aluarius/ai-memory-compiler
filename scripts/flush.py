@@ -270,6 +270,7 @@ async def run_flush_claude(prompt: str) -> str:
 
     for attempt in range(1, total_attempts + 1):
         response = ""
+        result_seen = False
         stderr_lines: list[str] = []
 
         def capture_stderr(line: str) -> None:
@@ -291,9 +292,18 @@ async def run_flush_claude(prompt: str) -> str:
                         if isinstance(block, TextBlock):
                             response += block.text
                 elif isinstance(message, ResultMessage):
-                    pass
+                    result_seen = getattr(message, "subtype", "success") == "success"
             return response.strip()
         except Exception as e:
+            # CLI teardown can fail AFTER a successful result was delivered
+            # (same pattern as compile.py). Don't burn a retry on it.
+            if result_seen and response.strip():
+                logging.warning(
+                    "Stream teardown error after successful result (attempt %d): %s",
+                    attempt,
+                    e,
+                )
+                return response.strip()
             import traceback
 
             stderr_output = "\n".join(stderr_lines[-20:]) if stderr_lines else "(no stderr captured)"

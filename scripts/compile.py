@@ -161,6 +161,7 @@ Read the daily log above and compile it into wiki articles following the schema 
                 query,
             )
 
+            result_subtype: str | None = None
             try:
                 async for message in query(
                     prompt=prompt,
@@ -169,7 +170,9 @@ Read the daily log above and compile it into wiki articles following the schema 
                         system_prompt={"type": "preset", "preset": "claude_code"},
                         allowed_tools=["Read", "Write", "Edit", "Glob", "Grep"],
                         permission_mode="acceptEdits",
-                        max_turns=30,
+                        # Big days (10+ sessions) ran out at 30 — the CLI then
+                        # exits non-zero mid-compile with partial writes.
+                        max_turns=60,
                     ),
                 ):
                     if isinstance(message, AssistantMessage):
@@ -178,9 +181,21 @@ Read the daily log above and compile it into wiki articles following the schema 
                                 pass
                     elif isinstance(message, ResultMessage):
                         cost = message.total_cost_usd or 0.0
+                        result_subtype = getattr(message, "subtype", None)
                         print(f"  Cost: ${cost:.4f}")
             except Exception as e:
-                print(f"  Error: {e}")
+                # The CLI sometimes exits non-zero during stream teardown AFTER
+                # delivering a successful ResultMessage (observed twice on large
+                # logs: cost printed, articles written, then 'Fatal error in
+                # message reader'). The work is done — don't fail the compile.
+                if result_subtype == "success":
+                    print(f"  Warning: stream teardown error after successful result: {e}")
+                else:
+                    print(f"  Error: {e}")
+                    return None
+
+            if result_subtype and result_subtype != "success":
+                print(f"  Error: compile ended with result subtype '{result_subtype}'")
                 return None
 
     # Update state
