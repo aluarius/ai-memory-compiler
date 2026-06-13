@@ -535,11 +535,23 @@ def retry_failed_flushes(limit: int | None = None, force: bool = False) -> int:
     `force` is set (the manual CLI invocation forces; automated paths don't).
     """
     groups = group_failed_contexts()
+
+    # Prune orphaned retry-state entries: a session whose files are all gone
+    # (recovered out-of-band, or moved to permanent via a differently-named
+    # copy) leaves a dangling counter that would never be revisited. Drop it
+    # so retry-state.json doesn't accumulate dead entries forever.
+    retry_state = load_retry_state()
+    orphans = [sid for sid in retry_state if sid not in groups]
+    if orphans:
+        for sid in orphans:
+            retry_state.pop(sid, None)
+        save_retry_state(retry_state)
+        logging.info("retry-failed: pruned %d orphaned retry-state entr(ies)", len(orphans))
+
     if not groups:
         logging.info("retry-failed: nothing to retry")
         return 0
 
-    retry_state = load_retry_state()
     recovered = 0
     processed = 0
     now = datetime.now(timezone.utc).astimezone()

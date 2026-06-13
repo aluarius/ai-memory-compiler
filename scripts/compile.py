@@ -133,7 +133,8 @@ Read the daily log above and compile it into wiki articles following the schema 
 
     cost = 0.0
     runtime = get_task_runtime("compile")
-    print(f"  Runtime: {runtime}")
+    model = get_codex_model() if runtime == "codex" else get_claude_model()
+    print(f"  Runtime: {runtime} (model: {model or 'default'})")
 
     # Serialize against flush/lint LLM calls: concurrent bundled-CLI instances
     # crash each other with exit 1 (a backlog compile died exactly this way
@@ -208,6 +209,7 @@ Read the daily log above and compile it into wiki articles following the schema 
             "compiled_at": now_iso(),
             "cost_usd": cost,
             "processor_runtime": runtime,
+            "model": model,
         }
         current_state["total_cost"] = current_state.get("total_cost", 0.0) + cost
 

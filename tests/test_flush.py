@@ -341,3 +341,28 @@ def test_retry_failed_skips_sessions_in_cooldown_unless_forced(
     assert flush.retry_failed_flushes(force=True) == 1
     assert len(calls) == 1
     assert not f.exists()
+
+
+def test_retry_failed_prunes_orphaned_retry_state(tmp_path, monkeypatch) -> None:
+    failed_dir = _setup_failed_dir(tmp_path, monkeypatch)
+    # A live failed context for one session...
+    live = failed_dir / f"session-flush-{UUID_A}.md"
+    live.write_text("content", encoding="utf-8")
+    # ...and a retry-state entry for a session whose file is gone.
+    flush.save_retry_state(
+        {
+            UUID_A: {"attempts": 1},
+            UUID_B: {"attempts": 2, "last_error": "x"},  # orphan: no file
+        }
+    )
+
+    async def fake_flush(context: str) -> str:
+        return "FLUSH_OK"
+
+    monkeypatch.setattr(flush, "run_flush", fake_flush)
+
+    flush.retry_failed_flushes(force=True)
+
+    state = flush.load_retry_state()
+    assert UUID_B not in state  # orphan pruned
+    assert UUID_A not in state  # recovered + cleared
