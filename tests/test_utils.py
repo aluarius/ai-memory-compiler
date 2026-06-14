@@ -68,6 +68,31 @@ echo '[[concepts/also-not-a-link]]'
     assert utils.extract_wikilinks(content) == ["concepts/real-link"]
 
 
+def test_extract_wikilinks_strips_obsidian_alias_syntax() -> None:
+    content = "see [[concepts/foo|VW-4 Shops]] and [[concepts/bar]]"
+    assert utils.extract_wikilinks(content) == ["concepts/foo", "concepts/bar"]
+
+
+def test_wiki_article_exists_resolves_aliased_link_target(tmp_path, monkeypatch) -> None:
+    kb = tmp_path / "knowledge"
+    (kb / "concepts").mkdir(parents=True)
+    (kb / "concepts" / "foo.md").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(utils, "KNOWLEDGE_DIR", kb)
+
+    # The alias-stripped target from extract_wikilinks must resolve on disk.
+    (target,) = utils.extract_wikilinks("[[concepts/foo|Display]]")
+    assert utils.wiki_article_exists(target)
+
+
+def test_list_indexed_articles_strips_alias_targets() -> None:
+    index = """# Index
+
+| [[concepts/foo|Alias]] | s | d | 2026-06-14 |
+| [[concepts/bar]] | s | d | 2026-06-14 |
+"""
+    assert utils.list_indexed_articles(index) == {"concepts/foo", "concepts/bar"}
+
+
 def test_normalize_build_log_sorts_entries_chronologically() -> None:
     content = """# Build Log
 

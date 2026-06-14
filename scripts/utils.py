@@ -83,8 +83,15 @@ def strip_markdown_code(content: str) -> str:
 
 
 def extract_wikilinks(content: str) -> list[str]:
-    """Extract all [[wikilinks]] from markdown content."""
-    return re.findall(r"\[\[([^\]]+)\]\]", strip_markdown_code(content))
+    """Extract all [[wikilinks]] from markdown content.
+
+    Handles Obsidian alias syntax `[[target|display text]]` by returning only
+    the target (the part before the first `|`). The display text is for humans
+    and must not be treated as part of the link target — otherwise the link
+    reads as broken and pollutes orphan/backlink/connectivity analysis.
+    """
+    raw = re.findall(r"\[\[([^\]]+)\]\]", strip_markdown_code(content))
+    return [link.split("|", 1)[0].strip() for link in raw]
 
 
 def wiki_article_exists(link: str) -> bool:
@@ -143,10 +150,14 @@ def read_wiki_index() -> str:
 
 
 def list_indexed_articles(index_content: str | None = None) -> set[str]:
-    """Return all article paths referenced from knowledge/index.md."""
+    """Return all article paths referenced from knowledge/index.md.
+
+    Uses extract_wikilinks so Obsidian alias syntax `[[target|display]]`
+    resolves to the bare target, consistent with link checks elsewhere.
+    """
     if index_content is None:
         index_content = read_wiki_index()
-    return {match.strip() for match in re.findall(r"\[\[([^\]]+)\]\]", index_content)}
+    return set(extract_wikilinks(index_content))
 
 
 def read_all_wiki_content() -> str:
