@@ -9,12 +9,12 @@
         <string>/opt/homebrew/bin/uv</string>
         <string>run</string>
         <string>--directory</string>
-        <string>/Users/exmac/Desktop/ideas/claude-memory-compiler</string>
+        <string>/Users/exmac/dev/claude-memory-compiler</string>
         <string>python</string>
         <string>scripts/maintenance.py</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/exmac/Desktop/ideas/claude-memory-compiler</string>
+    <string>/Users/exmac/dev/claude-memory-compiler</string>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
