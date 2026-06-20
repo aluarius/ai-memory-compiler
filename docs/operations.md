@@ -121,6 +121,10 @@ other; the lock makes bursts of session-end hooks queue instead of failing.
 - **Manual** — `uv run python scripts/compile.py` (`--dry-run` to preview,
   `--skip-today` to leave the growing log alone, `--all` to force).
 
+Each single-log LLM compile is bounded by `MEMORY_COMPILE_TIMEOUT_SECONDS`
+(default: 1200 seconds). Lower it for debugging a stuck Claude SDK stream, for
+example `MEMORY_COMPILE_TIMEOUT_SECONDS=300 uv run python scripts/compile.py`.
+
 ## Scheduled Maintenance
 
 `scripts/maintenance.py` runs nightly at 04:30 via launchd

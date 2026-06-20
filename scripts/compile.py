@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -44,6 +45,20 @@ from utils import (
 
 # ── Paths for the LLM to use ──────────────────────────────────────────
 ROOT_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_COMPILE_TIMEOUT_SECONDS = 20 * 60
+COMPILE_TIMEOUT_ENV = "MEMORY_COMPILE_TIMEOUT_SECONDS"
+
+
+def get_compile_timeout_seconds() -> float:
+    """Return the wall-clock timeout for one LLM compile call."""
+    raw = os.environ.get(COMPILE_TIMEOUT_ENV)
+    if not raw:
+        return DEFAULT_COMPILE_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_COMPILE_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_COMPILE_TIMEOUT_SECONDS
 
 
 async def compile_daily_log(log_path: Path) -> float | None:
@@ -134,6 +149,7 @@ Read the daily log above and compile it into wiki articles following the schema 
     cost = 0.0
     runtime = get_task_runtime("compile")
     model = get_codex_model() if runtime == "codex" else get_claude_model()
+    timeout_seconds = get_compile_timeout_seconds()
     print(f"  Runtime: {runtime} (model: {model or 'default'})")
 
     # Serialize against flush/lint LLM calls: concurrent bundled-CLI instances
@@ -163,7 +179,9 @@ Read the daily log above and compile it into wiki articles following the schema 
             )
 
             result_subtype: str | None = None
-            try:
+
+            async def run_claude_compile() -> None:
+                nonlocal cost, result_subtype
                 async for message in query(
                     prompt=prompt,
                     options=ClaudeAgentOptions(
@@ -185,6 +203,22 @@ Read the daily log above and compile it into wiki articles following the schema 
                         cost = message.total_cost_usd or 0.0
                         result_subtype = getattr(message, "subtype", None)
                         print(f"  Cost: ${cost:.4f}")
+
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    await run_claude_compile()
+            except TimeoutError:
+                if result_subtype == "success":
+                    print(
+                        "  Warning: compile timed out during stream teardown after "
+                        "successful result"
+                    )
+                else:
+                    print(
+                        "  Error: compile timed out after "
+                        f"{timeout_seconds:g}s waiting for Claude runtime"
+                    )
+                    return None
             except Exception as e:
                 # The CLI sometimes exits non-zero during stream teardown AFTER
                 # delivering a successful ResultMessage (observed twice on large
