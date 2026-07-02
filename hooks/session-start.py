@@ -32,6 +32,11 @@ ROOT = Path(__file__).resolve().parent.parent
 KNOWLEDGE_DIR = ROOT / "knowledge"
 DAILY_DIR = ROOT / "daily"
 INDEX_FILE = KNOWLEDGE_DIR / "index.md"
+USAGE_FILE = ROOT / "scripts" / "usage.json"
+
+# An article read this many times via the MCP server qualifies as a hub even
+# with a single compiled source — actual usage beats compile-count heuristics.
+MIN_HUB_READS = 2
 
 # Claude Code persists hook outputs larger than ~10KB to a file instead of
 # inlining them (the model then sees only a 2KB preview + path). Observed on
@@ -61,6 +66,20 @@ def get_recent_log() -> str:
             return "\n".join(recent)
 
     return "(no recent daily log)"
+
+
+def load_usage_counts() -> dict:
+    """Article read counters written by the MCP server; {} when absent/corrupt."""
+    try:
+        data = json.loads(USAGE_FILE.read_text(encoding="utf-8"))
+        reads = data.get("article_reads", {})
+        return {
+            key: int(value.get("count", 0))
+            for key, value in reads.items()
+            if isinstance(value, dict)
+        }
+    except (OSError, ValueError, AttributeError):
+        return {}
 
 
 def parse_index_rows(index_text: str) -> list[dict]:
@@ -94,22 +113,31 @@ def select_tier_rows(
     now: datetime,
     recent_days: int = RECENT_DAYS,
     max_hubs: int = MAX_HUB_ROWS,
+    usage: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Split rows into (recent, hubs).
 
     recent — updated within recent_days, newest first.
-    hubs — top-N remaining rows by source count (long-lived accumulating
-    topics), most sources first. Rows already in recent are excluded.
+    hubs — top-N remaining rows ranked by MCP read count, then source count
+    (long-lived accumulating topics). A row qualifies through either signal.
+    Rows already in recent are excluded.
     """
     cutoff = (now - timedelta(days=recent_days)).strftime("%Y-%m-%d")
+    usage = usage or {}
+
+    def reads(row: dict) -> int:
+        return usage.get(row["link"].strip("[]"), 0)
 
     recent = [r for r in rows if r["updated"] >= cutoff]
     recent.sort(key=lambda r: r["updated"], reverse=True)
     recent_links = {r["link"] for r in recent}
 
     remaining = [r for r in rows if r["link"] not in recent_links]
-    remaining.sort(key=lambda r: (-r["source_count"], r["link"]))
-    hubs = [r for r in remaining if r["source_count"] >= 2][:max_hubs]
+    remaining.sort(key=lambda r: (-reads(r), -r["source_count"], r["link"]))
+    hubs = [
+        r for r in remaining
+        if r["source_count"] >= 2 or reads(r) >= MIN_HUB_READS
+    ][:max_hubs]
 
     return recent, hubs
 
@@ -118,14 +146,16 @@ def _format_row(row: dict) -> str:
     return f"| {row['link']} | {row['summary']} | {row['updated']} |"
 
 
-def build_kb_section(rows: list[dict], now: datetime, budget: int) -> str:
+def build_kb_section(
+    rows: list[dict], now: datetime, budget: int, usage: dict | None = None
+) -> str:
     """Build the tiered KB section within a character budget.
 
     Priority: recent rows (newest first), then hub rows. Rows that don't
     fit are dropped whole — never truncated mid-row.
     """
     total = len(rows)
-    recent, hubs = select_tier_rows(rows, now)
+    recent, hubs = select_tier_rows(rows, now, usage=usage)
 
     header = (
         f"## Knowledge Base (tiered view: {total} articles total)\n\n"
@@ -176,7 +206,7 @@ def build_context() -> str:
         budget = MAX_CONTEXT_CHARS - len(fixed) - 16  # separator slack
         rows = parse_index_rows(INDEX_FILE.read_text(encoding="utf-8"))
         if rows and budget > 500:
-            parts.append(build_kb_section(rows, now, budget))
+            parts.append(build_kb_section(rows, now, budget, load_usage_counts()))
         elif budget > 100:
             parts.append(
                 f"## Knowledge Base\n\nIndex at `{INDEX_FILE}` — grep it or use "

@@ -104,3 +104,51 @@ def test_build_context_under_cap_with_real_kb():
     assert log_pos != -1
     if kb_pos != -1:
         assert log_pos < kb_pos
+
+
+# ---------------------------------------------------------------------------
+# Usage-aware hub selection
+# ---------------------------------------------------------------------------
+
+
+def test_select_tier_hubs_boosted_by_usage():
+    mod = load_session_start_module()
+    rows = mod.parse_index_rows(SAMPLE_INDEX)
+    usage = {"concepts/old-single": 7}
+
+    recent, hubs = mod.select_tier_rows(rows, NOW, usage=usage)
+
+    hub_links = [r["link"] for r in hubs]
+    # single-source article qualifies via reads and outranks source-count hubs
+    assert hub_links[0] == "[[concepts/old-single]]"
+    assert "[[concepts/old-hub]]" in hub_links
+
+
+def test_select_tier_without_usage_unchanged():
+    mod = load_session_start_module()
+    rows = mod.parse_index_rows(SAMPLE_INDEX)
+
+    _, hubs = mod.select_tier_rows(rows, NOW)
+
+    assert [r["link"] for r in hubs] == [
+        "[[concepts/old-hub]]", "[[concepts/old-pair]]"
+    ]
+
+
+def test_load_usage_counts_missing_and_corrupt(tmp_path, monkeypatch):
+    mod = load_session_start_module()
+    monkeypatch.setattr(mod, "USAGE_FILE", tmp_path / "missing.json")
+    assert mod.load_usage_counts() == {}
+
+    corrupt = tmp_path / "usage.json"
+    corrupt.write_text("{nope", encoding="utf-8")
+    monkeypatch.setattr(mod, "USAGE_FILE", corrupt)
+    assert mod.load_usage_counts() == {}
+
+    good = tmp_path / "good.json"
+    good.write_text(
+        '{"article_reads": {"concepts/x": {"count": 3, "last": "2026-07-01"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mod, "USAGE_FILE", good)
+    assert mod.load_usage_counts() == {"concepts/x": 3}
