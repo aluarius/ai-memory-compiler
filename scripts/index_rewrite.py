@@ -84,18 +84,38 @@ def build_rewrite_prompt(targets: list[dict]) -> str:
     joined = "\n\n".join(blocks)
     return f"""You maintain the index of a personal knowledge base. Rewrite each
 index summary below as ONE line of essence: present state only, no appended
-history, no dates, at most {MAX_SUMMARY_CHARS} characters.
+history, no dates.
 
 Rules:
+- HARD LIMIT {MAX_SUMMARY_CHARS} characters per summary — longer lines are DISCARDED by the
+  parser. Aim for ~170 characters to stay safely under it.
 - Output EXACTLY one line per item, format: <target>: <new summary>
 - <target> is the id after '###' (e.g. concepts/foo), copied verbatim
 - Plain text only: no '|' characters, no [[wikilinks]], no newlines inside a summary
-- Keep concrete technical anchors (tool names, error names, key decisions) over generic phrasing
+- Keep the 2-4 most load-bearing technical anchors (tool names, error names,
+  key decisions); drop the rest rather than compressing everything
 - Output nothing else — no preamble, no code fences
 
 ## Items to rewrite
 
 {joined}"""
+
+
+def _truncate_at_clause(summary: str, limit: int = MAX_SUMMARY_CHARS) -> str | None:
+    """Cut an over-limit summary at the last complete '; ' clause within limit.
+
+    The model reliably lands 5-15% over the cap on dense rows; since these
+    summaries are semicolon-separated fact lists, dropping trailing clauses
+    beats discarding an otherwise good rewrite. Returns None when no clause
+    boundary leaves at least half the limit — better to keep the old summary
+    than to gut the new one.
+    """
+    if len(summary) <= limit:
+        return summary
+    cut = summary.rfind("; ", 0, limit)
+    if cut >= limit // 2:
+        return summary[:cut].rstrip(" ;,")
+    return None
 
 
 def parse_rewrite_response(response: str, targets: list[dict]) -> dict[str, str]:
@@ -109,9 +129,12 @@ def parse_rewrite_response(response: str, targets: list[dict]) -> dict[str, str]
         target, summary = m.group(1), m.group(2).strip()
         if target not in requested:
             continue
-        if not summary or len(summary) > MAX_SUMMARY_CHARS or "|" in summary or "[[" in summary:
+        if not summary or "|" in summary or "[[" in summary:
             continue
-        out[target] = summary
+        truncated = _truncate_at_clause(summary)
+        if truncated is None:
+            continue
+        out[target] = truncated
     return out
 
 

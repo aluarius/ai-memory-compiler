@@ -114,3 +114,21 @@ def test_run_summary_rewrite_survives_llm_failure(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(index_rewrite, "_call_llm", broken_llm)
 
     assert asyncio.run(index_rewrite.run_summary_rewrite()) == 0
+
+
+def test_parse_response_truncates_slightly_over_limit_at_clause(monkeypatch, tmp_path: Path) -> None:
+    targets = [
+        {"target": "concepts/a", "summary": "x" * 250, "kind": "long", "excerpt": None},
+        {"target": "concepts/b", "summary": "y" * 250, "kind": "long", "excerpt": None},
+    ]
+    # 3 clauses; full line > 200, first two clauses fit
+    clause = "k" * 90
+    over = f"{clause}; {clause}; {clause}"
+    no_boundary = "z" * 220  # over limit, no clause boundary -> rejected
+    response = f"concepts/a: {over}\nconcepts/b: {no_boundary}"
+
+    parsed = index_rewrite.parse_rewrite_response(response, targets)
+
+    assert parsed["concepts/a"] == f"{clause}; {clause}"
+    assert len(parsed["concepts/a"]) <= index_rewrite.MAX_SUMMARY_CHARS
+    assert "concepts/b" not in parsed
