@@ -100,3 +100,23 @@ def test_fix_index_source_sprawl_noop_on_clean_index(monkeypatch, tmp_path: Path
 
     issues = lint.check_index_hygiene()
     assert lint.fix_index_source_sprawl(issues) == 0
+
+
+def test_source_sprawl_not_autofixable_when_summary_contains_raw_pipes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # A raw '|' inside the summary shifts cell parsing: the regex sees part of
+    # the summary as the sources cell. Collapsing that cell destroys content,
+    # so such rows must never be marked auto-fixable.
+    rows = [
+        "| [[concepts/broken]] | summary part | tail with, commas, more, stuff, here | daily/a.md | 2026-06-01 |",
+        "| [[concepts/real-sprawl]] | ok | daily/a.md, daily/b.md, daily/c.md, daily/d.md, daily/e.md | 2026-06-01 |",
+    ]
+    knowledge_dir = _write_index(tmp_path, rows)
+    monkeypatch.setattr(lint, "KNOWLEDGE_DIR", knowledge_dir)
+
+    issues = lint.check_index_hygiene()
+
+    sprawl = {i["target"]: i for i in issues if i.get("subcheck") == "source_sprawl"}
+    assert sprawl["concepts/real-sprawl"].get("auto_fixable") is True
+    assert "concepts/broken" not in sprawl or not sprawl["concepts/broken"].get("auto_fixable")

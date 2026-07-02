@@ -178,6 +178,17 @@ def check_missing_backlinks() -> list[dict]:
 MAX_INDEX_SUMMARY_CHARS = 200
 MAX_INDEX_SOURCES = 3
 
+# A legitimate sources cell is a comma list of daily-log refs (optionally
+# collapsed with '+N more'). Anything else means the row's cells mis-parsed —
+# e.g. a raw '|' inside the summary shifted the columns — and auto-collapsing
+# it would destroy summary content.
+_SOURCE_PART_RE = re.compile(r"^(?:\[\[)?(?:daily/)?[\w./-]+(?:\]\])?(?:\s\+\d+ more)?$")
+
+
+def _looks_like_sources_cell(cell: str) -> bool:
+    parts = [p.strip() for p in cell.split(",") if p.strip()]
+    return bool(parts) and all(_SOURCE_PART_RE.match(p) for p in parts)
+
 
 def check_index_hygiene() -> list[dict]:
     """Flag index rows that bloat the index: run-on summaries and source sprawl.
@@ -214,20 +225,28 @@ def check_index_hygiene() -> list[dict]:
 
         source_count = sources.count(",") + 1 if sources.strip() else 0
         if source_count > MAX_INDEX_SOURCES:
-            issues.append({
+            fixable = _looks_like_sources_cell(sources)
+            issue = {
                 "severity": "suggestion",
                 "check": "index_hygiene",
                 "subcheck": "source_sprawl",
                 "file": "index.md",
                 "target": link,
-                "source_cell": sources,
                 "detail": (
                     f"[[{link}]] lists {source_count} sources in the index "
-                    f"(max {MAX_INDEX_SOURCES}). Collapse to 'first, latest +N more' "
-                    "(auto-fixable); the full list lives in the article frontmatter."
+                    f"(max {MAX_INDEX_SOURCES}). Collapse to 'first, latest +N more'"
+                    + (
+                        " (auto-fixable); the full list lives in the article frontmatter."
+                        if fixable
+                        else "; cell does not parse as a source list (raw '|' in the "
+                        "summary?) — fix the row by hand."
+                    )
                 ),
-                "auto_fixable": True,
-            })
+            }
+            if fixable:
+                issue["source_cell"] = sources
+                issue["auto_fixable"] = True
+            issues.append(issue)
 
     return issues
 
