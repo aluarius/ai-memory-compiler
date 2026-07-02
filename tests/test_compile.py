@@ -125,3 +125,33 @@ def test_main_rolls_back_on_failed_compile(monkeypatch, tmp_path) -> None:
     assert "kb_rollback" in calls[idx:]
     assert "clear_inflight" in calls[idx:]
     assert not any(c == "kb_commit:compile 2026-07-01.md" for c in calls)
+
+
+def test_maybe_run_consolidation_respects_interval(monkeypatch) -> None:
+    ran = []
+    monkeypatch.setattr(
+        compile_script, "load_state",
+        lambda: {"last_consolidation": "2026-07-01T10:00:00+05:00"},
+    )
+    monkeypatch.setattr(
+        compile_script, "_run_consolidation_pass", lambda: ran.append(True)
+    )
+
+    compile_script.maybe_run_consolidation()
+
+    assert ran == []
+
+
+def test_maybe_run_consolidation_runs_when_stale(monkeypatch) -> None:
+    ran = []
+    monkeypatch.setattr(
+        compile_script, "load_state",
+        lambda: {"last_consolidation": "2026-01-01T10:00:00+05:00"},
+    )
+    monkeypatch.setattr(
+        compile_script, "_run_consolidation_pass", lambda: ran.append(True)
+    )
+
+    compile_script.maybe_run_consolidation()
+
+    assert ran == [True]

@@ -277,8 +277,41 @@ def run_summary_rewrite_best_effort() -> None:
         print(f"  Warning: index summary rewrite skipped: {e}")
 
 
-def maybe_run_consolidation() -> None:  # implemented in Task 7
-    pass
+CONSOLIDATION_INTERVAL_DAYS = 30
+
+
+def _run_consolidation_pass() -> None:
+    # Lazy import: consolidate imports compile (timeout helper), so importing
+    # it at module top would be circular.
+    from consolidate import run_consolidation
+
+    ok = asyncio.run(run_consolidation())
+    if not ok:
+        print("  Consolidation failed; will retry on a later compile.")
+
+
+def maybe_run_consolidation() -> None:
+    """Run a consolidation pass when the last one is older than the interval.
+
+    Triggered post-compile (not from 04:30 maintenance) so the LLM runs in
+    active hours with an unlocked keychain, right after compile proved the
+    runtime works.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    state = load_state()
+    last = state.get("last_consolidation")
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(last)
+        except ValueError:
+            last_dt = None
+        if last_dt is not None:
+            age = datetime.now(timezone.utc).astimezone() - last_dt
+            if age < timedelta(days=CONSOLIDATION_INTERVAL_DAYS):
+                return
+    print("\nRunning monthly consolidation pass...")
+    _run_consolidation_pass()
 
 
 def main():
