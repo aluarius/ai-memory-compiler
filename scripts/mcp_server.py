@@ -10,11 +10,14 @@ Usage (stdio transport, registered in ~/.claude/settings.json):
 
 from __future__ import annotations
 
+import json
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from locking import file_lock
 from utils import safe_join
 
 # Resolve paths relative to this file so it works from any cwd
@@ -29,6 +32,33 @@ DAILY_DIR = ROOT_DIR / "daily"
 mcp = FastMCP("knowledge-base")
 
 ARTICLE_DIRS = [CONCEPTS_DIR, CONNECTIONS_DIR, QA_DIR]
+
+USAGE_FILE = ROOT_DIR / "scripts" / "usage.json"
+USAGE_LOCK = ROOT_DIR / "scripts" / ".locks" / "usage.lock"
+
+
+def _record_article_read(rel_path: str) -> None:
+    """Best-effort read counter feeding session-start hub selection.
+
+    Telemetry must never break the tool — any failure is swallowed.
+    """
+    try:
+        with file_lock(USAGE_LOCK):
+            data: dict = {}
+            if USAGE_FILE.exists():
+                try:
+                    data = json.loads(USAGE_FILE.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    data = {}
+            if not isinstance(data, dict):
+                data = {}
+            reads = data.setdefault("article_reads", {})
+            entry = reads.setdefault(rel_path, {"count": 0})
+            entry["count"] = int(entry.get("count", 0)) + 1
+            entry["last"] = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+            USAGE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _list_articles() -> list[Path]:
@@ -57,19 +87,28 @@ def search_knowledge(query: str) -> str:
     for article in _list_articles():
         content = article.read_text(encoding="utf-8")
         content_lower = content.lower()
-
-        # Score: how many keywords match
-        score = sum(1 for kw in keywords if kw in content_lower)
-        if score == 0:
-            continue
-
         rel = article.relative_to(KNOWLEDGE_DIR)
 
-        # Extract title from frontmatter
+        # Extract title from frontmatter (needed for scoring)
         title = str(rel)
         title_match = re.search(r"^title:\s*(.+)$", content, re.MULTILINE)
         if title_match:
             title = title_match.group(1).strip().strip('"')
+        title_lower = title.lower()
+
+        # Score: capped keyword frequency + a strong title-hit bonus
+        score = 0
+        matched = 0
+        for kw in keywords:
+            occurrences = content_lower.count(kw)
+            if occurrences == 0:
+                continue
+            matched += 1
+            score += min(occurrences, 5)
+            if kw in title_lower:
+                score += 5
+        if matched == 0:
+            continue
 
         # Extract matching lines for context (up to 5)
         lines = content.split("\n")
@@ -80,7 +119,7 @@ def search_knowledge(query: str) -> str:
             if len(matching) >= 5:
                 break
 
-        results.append((score, f"### [[{rel}]] — {title}\n**Relevance:** {score}/{len(keywords)} keywords\n" + "\n".join(f"> {m}" for m in matching)))
+        results.append((score, f"### [[{rel}]] — {title}\n**Relevance:** {matched}/{len(keywords)} keywords (score {score})\n" + "\n".join(f"> {m}" for m in matching)))
 
     if not results:
         return f"No articles matching '{query}'. Use list_articles() to see what's available."
@@ -105,9 +144,15 @@ def read_article(path: str) -> str:
         slug = Path(path).stem
         for a in _list_articles():
             if slug in a.stem:
+                _record_article_read(
+                    str(a.relative_to(KNOWLEDGE_DIR)).removesuffix(".md").replace("\\", "/")
+                )
                 return f"(Did you mean {a.relative_to(KNOWLEDGE_DIR)}?)\n\n" + a.read_text(encoding="utf-8")
         return f"Article not found: {path}. Use list_articles() to see available articles."
 
+    _record_article_read(
+        str(article.relative_to(KNOWLEDGE_DIR)).removesuffix(".md").replace("\\", "/")
+    )
     return article.read_text(encoding="utf-8")
 
 
