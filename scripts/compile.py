@@ -31,6 +31,14 @@ from config import (
     LOCKS_DIR,
     now_iso,
 )
+from kb_git import (
+    clear_inflight,
+    ensure_kb_repo,
+    kb_commit,
+    kb_rollback,
+    mark_inflight,
+    recover_interrupted_compile,
+)
 from locking import file_lock
 from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from utils import (
@@ -259,6 +267,14 @@ Read the daily log above and compile it into wiki articles following the schema 
     return cost
 
 
+def run_summary_rewrite_best_effort() -> None:  # implemented in Task 5
+    pass
+
+
+def maybe_run_consolidation() -> None:  # implemented in Task 7
+    pass
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compile daily logs into knowledge articles")
     parser.add_argument("--all", action="store_true", help="Force recompile all logs")
@@ -315,15 +331,25 @@ def main():
         if args.dry_run:
             return
 
+        ensure_kb_repo()
+        recover_interrupted_compile()
+
         total_cost = 0.0
         failed_logs: list[str] = []
         for i, log_path in enumerate(to_compile, 1):
             print(f"\n[{i}/{len(to_compile)}] Compiling {log_path.name}...")
+            kb_commit(f"checkpoint before compile of {log_path.name}")
+            mark_inflight(log_path.name)
             cost = asyncio.run(compile_daily_log(log_path))
             if cost is None:
+                if kb_rollback():
+                    print("  Rolled back partial knowledge/ writes.")
+                clear_inflight()
                 failed_logs.append(log_path.name)
                 print("  Failed.")
                 break
+            kb_commit(f"compile {log_path.name}")
+            clear_inflight()
             total_cost += cost
             print("  Done.")
 
@@ -345,7 +371,10 @@ def main():
             print("Skipping archive step; repair knowledge/index.md or broken links first.")
             sys.exit(1)
 
+        run_summary_rewrite_best_effort()
         archive_old_logs()
+        kb_commit("post-compile maintenance (lint fixes, index rewrite, archive)")
+        maybe_run_consolidation()
 
 
 def run_post_compile_lint() -> int:
