@@ -72,6 +72,14 @@ def slugify(text: str) -> str:
     return text.strip("-")
 
 
+# ── Index table parsing ───────────────────────────────────────────────
+
+# One index table row: | [[target]] | summary | sources | YYYY-MM-DD |
+INDEX_ROW_RE = re.compile(
+    r"^\|\s*\[\[([^\]]+)\]\]\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\|\s*$"
+)
+
+
 # ── Wikilink helpers ──────────────────────────────────────────────────
 
 def strip_markdown_code(content: str) -> str:

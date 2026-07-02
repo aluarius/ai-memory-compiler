@@ -22,6 +22,7 @@ from config import KNOWLEDGE_DIR, LLM_LOCK_FILE, REPORTS_DIR, now_iso, today_iso
 from locking import file_lock
 from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from utils import (
+    INDEX_ROW_RE,
     count_inbound_links,
     daily_source_exists,
     extract_wikilinks,
@@ -177,10 +178,6 @@ def check_missing_backlinks() -> list[dict]:
 MAX_INDEX_SUMMARY_CHARS = 200
 MAX_INDEX_SOURCES = 3
 
-_INDEX_ROW_RE = re.compile(
-    r"^\|\s*\[\[([^\]]+)\]\]\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\|\s*$"
-)
-
 
 def check_index_hygiene() -> list[dict]:
     """Flag index rows that bloat the index: run-on summaries and source sprawl.
@@ -196,7 +193,7 @@ def check_index_hygiene() -> list[dict]:
 
     issues = []
     for line in index_path.read_text(encoding="utf-8").splitlines():
-        m = _INDEX_ROW_RE.match(line.strip())
+        m = INDEX_ROW_RE.match(line.strip())
         if not m:
             continue
         link, summary, sources, _updated = m.groups()
