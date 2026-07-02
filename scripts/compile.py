@@ -267,8 +267,14 @@ Read the daily log above and compile it into wiki articles following the schema 
     return cost
 
 
-def run_summary_rewrite_best_effort() -> None:  # implemented in Task 5
-    pass
+def run_summary_rewrite_best_effort() -> None:
+    """Post-compile index summary rewrite; must never fail the compile."""
+    try:
+        from index_rewrite import run_summary_rewrite
+
+        asyncio.run(run_summary_rewrite())
+    except Exception as e:
+        print(f"  Warning: index summary rewrite skipped: {e}")
 
 
 def maybe_run_consolidation() -> None:  # implemented in Task 7
