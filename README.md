@@ -65,6 +65,12 @@ Add these entries inside the top-level `"hooks"` object:
 - **SessionEnd** — captures the conversation and extracts knowledge
 - **PreCompact** — safety net before auto-compaction discards context
 
+> Troubleshooting: `SessionStart hook (failed) — exited with code 127` means
+> `uv` is not on PATH in the environment Claude Code was launched from (e.g.
+> the desktop app doesn't source your shell profile). Use an absolute path in
+> the hook command: `/opt/homebrew/bin/uv run python hooks/session-start.py`
+> (`which uv` shows yours).
+
 ### Codex
 
 Codex hooks are documented now, but they are still experimental and disabled by
