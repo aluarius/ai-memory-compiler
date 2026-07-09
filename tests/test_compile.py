@@ -159,3 +159,41 @@ def test_maybe_run_consolidation_runs_when_stale(monkeypatch) -> None:
     compile_script.maybe_run_consolidation()
 
     assert ran == [True]
+
+
+# ---------------------------------------------------------------------------
+# Incremental compile of append-only daily logs
+# ---------------------------------------------------------------------------
+
+
+def test_plan_compile_input_modes() -> None:
+    from utils import data_hash
+
+    base = b"# log\n\n### Session (10:00)\nold content\n"
+    grown = base + b"\n### Session (23:00)\nnew content\n"
+
+    # never compiled / legacy state without size -> full
+    assert compile_script.plan_compile_input(grown, None) == ("full", grown)
+    assert compile_script.plan_compile_input(grown, {"hash": "x"}) == ("full", grown)
+
+    # compiled prefix intact -> incremental tail only
+    prev = {"hash": data_hash(base), "size": len(base)}
+    mode, tail = compile_script.plan_compile_input(grown, prev)
+    assert mode == "incremental"
+    assert tail == b"\n### Session (23:00)\nnew content\n"
+
+    # retroactive edit (prefix hash mismatch) -> full recompile
+    tampered = {"hash": "deadbeef00000000", "size": len(base)}
+    assert compile_script.plan_compile_input(grown, tampered) == ("full", grown)
+
+    # file did not grow -> full (selection normally filters this out)
+    same = {"hash": data_hash(grown), "size": len(grown)}
+    assert compile_script.plan_compile_input(grown, same) == ("full", grown)
+
+
+def test_build_log_section_marks_incremental() -> None:
+    full = compile_script.build_log_section("2026-07-09.md", "full")
+    inc = compile_script.build_log_section("2026-07-09.md", "incremental")
+
+    assert "2026-07-09.md" in full and "INCREMENTAL" not in full
+    assert "2026-07-09.md" in inc and "INCREMENTAL" in inc

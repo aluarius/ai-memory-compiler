@@ -191,6 +191,14 @@ uv run python scripts/consolidate.py             # run a pass (LLM, ~compile cos
 - **Manual** — `uv run python scripts/compile.py` (`--dry-run` to preview,
   `--skip-today` to leave the growing log alone, `--all` to force).
 
+Recompiles of a grown log are **incremental**: daily logs are append-only, so
+when the previously compiled content is an exact prefix of the current file
+(verified by hash + stored `size` in `scripts/state.json`), only the appended
+tail goes to the LLM, with an explicit incremental marker in the prompt. This
+matters on active evenings — every post-22:00 flush triggers a compile, and
+before this change one day was fully recompiled 8 times (~$4.5 each). Any
+retroactive edit of already-compiled content falls back to a full recompile.
+
 Each single-log LLM compile is bounded by `MEMORY_COMPILE_TIMEOUT_SECONDS`
 (default: 1200 seconds). Lower it for debugging a stuck Claude SDK stream, for
 example `MEMORY_COMPILE_TIMEOUT_SECONDS=300 uv run python scripts/compile.py`.

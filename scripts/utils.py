@@ -56,9 +56,14 @@ def update_state(mutator: Callable[[dict], None]) -> dict:
 
 # ── File hashing ──────────────────────────────────────────────────────
 
+def data_hash(data: bytes) -> str:
+    """SHA-256 hash of raw bytes (first 16 hex chars)."""
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
 def file_hash(path: Path) -> str:
     """SHA-256 hash of a file (first 16 hex chars)."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    return data_hash(path.read_bytes())
 
 
 # ── Slug / naming ─────────────────────────────────────────────────────

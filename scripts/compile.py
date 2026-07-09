@@ -42,6 +42,7 @@ from kb_git import (
 from locking import file_lock
 from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from utils import (
+    data_hash,
     file_hash,
     list_raw_files,
     list_wiki_articles,
@@ -69,14 +70,54 @@ def get_compile_timeout_seconds() -> float:
     return value if value > 0 else DEFAULT_COMPILE_TIMEOUT_SECONDS
 
 
+def plan_compile_input(data: bytes, prev: dict | None) -> tuple[str, bytes]:
+    """Decide between a full and an incremental compile of a daily log.
+
+    Daily logs are append-only: flushes only add sections. When the previously
+    compiled content is an exact prefix of the current file, only the appended
+    tail needs compiling — recompiling the whole day re-reads every session
+    through the LLM (observed: 8 full compiles of one active evening, ~$4.5
+    each). Any prefix mismatch (retroactive edit) falls back to a full compile.
+    """
+    if not prev:
+        return "full", data
+    size = prev.get("size")
+    if not isinstance(size, int) or size <= 0 or size >= len(data):
+        return "full", data
+    if data_hash(data[:size]) != prev.get("hash"):
+        return "full", data
+    return "incremental", data[size:]
+
+
+def build_log_section(log_name: str, mode: str) -> str:
+    """Header of the 'Daily Log to Compile' prompt section."""
+    header = f"**File:** {log_name}"
+    if mode == "incremental":
+        header += (
+            "\n\n**INCREMENTAL COMPILE:** earlier content of this log was already"
+            " compiled into the wiki on previous runs. Below is ONLY the newly"
+            " appended part. Extract knowledge from it and update existing"
+            " articles as usual, but do not re-extract or duplicate anything"
+            " from earlier sessions of this day."
+        )
+    return header
+
+
 async def compile_daily_log(log_path: Path) -> float | None:
     """Compile a single daily log into knowledge articles.
 
     Returns the API cost of the compilation, or None if the compiler runtime failed.
     """
     with file_lock(DAILY_LOG_LOCK_FILE):
-        log_content = log_path.read_text(encoding="utf-8")
-        compiled_hash = file_hash(log_path)
+        raw = log_path.read_bytes()
+    compiled_hash = data_hash(raw)
+    compiled_size = len(raw)
+
+    prev = load_state().get("ingested", {}).get(log_path.name)
+    mode, content_bytes = plan_compile_input(raw, prev)
+    log_content = content_bytes.decode("utf-8", errors="replace")
+    if mode == "incremental":
+        print(f"  Incremental compile: {len(content_bytes)} new bytes (of {compiled_size})")
 
     schema = AGENTS_FILE.read_text(encoding="utf-8")
     wiki_index = read_wiki_index()
@@ -96,7 +137,7 @@ and extract knowledge into structured wiki articles.
 
 ## Daily Log to Compile
 
-**File:** {log_path.name}
+{build_log_section(log_path.name, mode)}
 
 {log_content}
 
@@ -248,6 +289,7 @@ Read the daily log above and compile it into wiki articles following the schema 
     def mutate(current_state: dict) -> None:
         current_state.setdefault("ingested", {})[rel_path] = {
             "hash": compiled_hash,
+            "size": compiled_size,
             "compiled_at": now_iso(),
             "cost_usd": cost,
             "processor_runtime": runtime,
