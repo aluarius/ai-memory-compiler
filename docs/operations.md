@@ -183,7 +183,10 @@ uv run python scripts/consolidate.py             # run a pass (LLM, ~compile cos
 `compile.py` runs in three ways:
 
 - **End-of-day** — a successful flush after 22:00 triggers a full compile,
-  including today's log (original behavior).
+  including today's log (original behavior). Debounced: if today's log was
+  compiled less than 30 minutes ago, the trigger is skipped and the appended
+  tail waits for the next flush outside the window or the morning backlog
+  (an active evening otherwise recompiles the day on every flush).
 - **Daytime backlog** — a successful flush at any hour triggers
   `compile.py --skip-today` when logs from *past* days are uncompiled or
   stale. This closes the gap where days whose last session ended before

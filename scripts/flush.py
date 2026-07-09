@@ -22,7 +22,7 @@ import json
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 
@@ -362,19 +362,39 @@ def _has_stale_past_logs(ingested: dict, today_log: str) -> bool:
     return False
 
 
-def maybe_trigger_compilation() -> None:
+COMPILE_DEBOUNCE_MINUTES = 30
+
+
+def _compiled_recently(entry: dict, now: datetime) -> bool:
+    """True if this log's last compile is within the debounce window."""
+    compiled_at = entry.get("compiled_at")
+    if not compiled_at:
+        return False
+    try:
+        last = datetime.fromisoformat(compiled_at)
+    except ValueError:
+        return False
+    return (now - last) < timedelta(minutes=COMPILE_DEBOUNCE_MINUTES)
+
+
+def maybe_trigger_compilation(now: datetime | None = None) -> None:
     """Trigger compile.py when there is finished material to compile.
 
     Two paths:
     - After COMPILE_AFTER_HOUR: today's log is considered final → full compile
-      (original end-of-day behavior).
+      (original end-of-day behavior), debounced to once per
+      COMPILE_DEBOUNCE_MINUTES — an active evening otherwise recompiles the
+      day on every flush (observed: 8 compiles in 70 minutes). The tail left
+      by a debounced flush lands with the next flush outside the window or
+      with the morning backlog pass.
     - Any time of day: logs from PAST days pending (the 22:00 gate misses
       days when the last session ends early — observed 3-day backlog) →
       compile with --skip-today so the still-growing log isn't churned.
     """
     import subprocess as _sp
 
-    now = datetime.now(timezone.utc).astimezone()
+    if now is None:
+        now = datetime.now(timezone.utc).astimezone()
     today_log = f"{now.strftime('%Y-%m-%d')}.md"
 
     ingested: dict = {}
@@ -393,6 +413,14 @@ def maybe_trigger_compilation() -> None:
             if log_path.exists() and ingested[today_log].get("hash") == file_hash(log_path):
                 if not _has_stale_past_logs(ingested, today_log):
                     return
+            if _compiled_recently(ingested[today_log], now) and not _has_stale_past_logs(
+                ingested, today_log
+            ):
+                logging.info(
+                    "End-of-day compilation debounced (compiled < %d min ago)",
+                    COMPILE_DEBOUNCE_MINUTES,
+                )
+                return
     else:
         if not _has_stale_past_logs(ingested, today_log):
             return

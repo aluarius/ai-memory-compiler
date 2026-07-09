@@ -366,3 +366,70 @@ def test_retry_failed_prunes_orphaned_retry_state(tmp_path, monkeypatch) -> None
     state = flush.load_retry_state()
     assert UUID_B not in state  # orphan pruned
     assert UUID_A not in state  # recovered + cleared
+
+
+# ---------------------------------------------------------------------------
+# End-of-day compile debounce
+# ---------------------------------------------------------------------------
+
+
+def _trigger_setup(monkeypatch, tmp_path: Path, compiled_at: str):
+    """Fake state + grown today-log for maybe_trigger_compilation tests."""
+    import json as _json
+    import subprocess
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    daily = tmp_path / "daily"
+    daily.mkdir()
+    log = daily / "2026-07-09.md"
+    log.write_text("grown content", encoding="utf-8")
+    (scripts / "compile.py").write_text("# stub", encoding="utf-8")
+
+    state = {
+        "ingested": {
+            "2026-07-09.md": {"hash": "stale-hash", "compiled_at": compiled_at}
+        }
+    }
+    (scripts / "state.json").write_text(_json.dumps(state), encoding="utf-8")
+
+    monkeypatch.setattr(flush, "SCRIPTS_DIR", scripts)
+    monkeypatch.setattr(flush, "DAILY_DIR", daily)
+
+    spawned = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: spawned.append(a[0]))
+    return spawned
+
+
+def test_end_of_day_compile_debounced_when_compiled_recently(monkeypatch, tmp_path: Path) -> None:
+    from datetime import datetime
+
+    now = datetime.fromisoformat("2026-07-09T23:00:00+05:00")
+    spawned = _trigger_setup(monkeypatch, tmp_path, "2026-07-09T22:55:00+05:00")
+
+    flush.maybe_trigger_compilation(now=now)
+
+    assert spawned == []
+
+
+def test_end_of_day_compile_triggers_after_debounce_window(monkeypatch, tmp_path: Path) -> None:
+    from datetime import datetime
+
+    now = datetime.fromisoformat("2026-07-09T23:00:00+05:00")
+    spawned = _trigger_setup(monkeypatch, tmp_path, "2026-07-09T22:15:00+05:00")
+
+    flush.maybe_trigger_compilation(now=now)
+
+    assert len(spawned) == 1
+
+
+def test_debounce_does_not_block_stale_past_logs(monkeypatch, tmp_path: Path) -> None:
+    from datetime import datetime
+
+    now = datetime.fromisoformat("2026-07-09T23:00:00+05:00")
+    spawned = _trigger_setup(monkeypatch, tmp_path, "2026-07-09T22:55:00+05:00")
+    (flush.DAILY_DIR / "2026-07-08.md").write_text("never compiled", encoding="utf-8")
+
+    flush.maybe_trigger_compilation(now=now)
+
+    assert len(spawned) == 1
