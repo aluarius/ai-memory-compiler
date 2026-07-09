@@ -37,6 +37,7 @@ from kb_git import (
     kb_commit,
     kb_rollback,
     mark_inflight,
+    read_inflight_info,
     recover_interrupted_compile,
 )
 from locking import file_lock
@@ -309,6 +310,43 @@ Read the daily log above and compile it into wiki articles following the schema 
     return cost
 
 
+def recover_from_interrupted_compile() -> None:
+    """Roll back partial writes AND reconcile state after a mid-compile kill.
+
+    compile_daily_log updates state before main() makes the kb commit. A kill
+    in that window leaves state claiming the log is compiled while the
+    rollback discards the articles — the lost content would never be
+    re-extracted. Detect it by comparing the state entry's compiled_at with
+    the inflight marker's start time: an entry written after the dead run
+    started belongs to that run and must go with the rollback.
+    """
+    info = read_inflight_info()
+    if not recover_interrupted_compile():
+        return
+    if not info:
+        return
+    log_name, started = info.get("log"), info.get("started")
+    if not log_name or not started:
+        return
+    entry = load_state().get("ingested", {}).get(log_name)
+    if not entry:
+        return
+    from datetime import datetime
+
+    try:
+        entry_at = datetime.fromisoformat(entry.get("compiled_at", ""))
+        started_at = datetime.fromisoformat(started)
+    except (ValueError, TypeError):
+        return
+    if entry_at >= started_at:
+
+        def drop(state: dict) -> None:
+            state.get("ingested", {}).pop(log_name, None)
+
+        update_state(drop)
+        print(f"  Reset ingestion state for {log_name}; it will recompile in full.")
+
+
 def run_summary_rewrite_best_effort() -> None:
     """Post-compile index summary rewrite; must never fail the compile."""
     try:
@@ -413,7 +451,7 @@ def main():
             return
 
         ensure_kb_repo()
-        recover_interrupted_compile()
+        recover_from_interrupted_compile()
 
         total_cost = 0.0
         failed_logs: list[str] = []

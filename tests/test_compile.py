@@ -197,3 +197,59 @@ def test_build_log_section_marks_incremental() -> None:
 
     assert "2026-07-09.md" in full and "INCREMENTAL" not in full
     assert "2026-07-09.md" in inc and "INCREMENTAL" in inc
+
+
+# ---------------------------------------------------------------------------
+# Crash-recovery state reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _recovery_env(monkeypatch, *, rolled_back, marker, state):
+    monkeypatch.setattr(compile_script, "read_inflight_info", lambda: marker)
+    monkeypatch.setattr(compile_script, "recover_interrupted_compile", lambda: rolled_back)
+    monkeypatch.setattr(compile_script, "load_state", lambda: state)
+
+    def fake_update(mutator):
+        mutator(state)
+        return state
+
+    monkeypatch.setattr(compile_script, "update_state", fake_update)
+
+
+def test_recovery_drops_state_written_by_dead_run(monkeypatch) -> None:
+    # compile_daily_log updated state, then the process died before kb_commit:
+    # the rollback discarded the articles, so the state entry must go too,
+    # otherwise the lost content is never re-extracted.
+    state = {"ingested": {"2026-07-09.md": {
+        "hash": "h2", "compiled_at": "2026-07-09T23:00:10+05:00"}}}
+    marker = {"log": "2026-07-09.md", "started": "2026-07-09T23:00:00+05:00"}
+    _recovery_env(monkeypatch, rolled_back=True, marker=marker, state=state)
+
+    compile_script.recover_from_interrupted_compile()
+
+    assert "2026-07-09.md" not in state["ingested"]
+
+
+def test_recovery_keeps_state_from_before_dead_run(monkeypatch) -> None:
+    # died during the LLM call, before its state update: the surviving entry
+    # belongs to an earlier successful compile and still matches the
+    # rolled-back KB — keep it so the next compile stays incremental.
+    state = {"ingested": {"2026-07-09.md": {
+        "hash": "h1", "compiled_at": "2026-07-09T22:00:00+05:00"}}}
+    marker = {"log": "2026-07-09.md", "started": "2026-07-09T23:00:00+05:00"}
+    _recovery_env(monkeypatch, rolled_back=True, marker=marker, state=state)
+
+    compile_script.recover_from_interrupted_compile()
+
+    assert "2026-07-09.md" in state["ingested"]
+
+
+def test_recovery_without_rollback_keeps_state(monkeypatch) -> None:
+    state = {"ingested": {"2026-07-09.md": {
+        "hash": "h2", "compiled_at": "2026-07-09T23:00:10+05:00"}}}
+    marker = {"log": "2026-07-09.md", "started": "2026-07-09T23:00:00+05:00"}
+    _recovery_env(monkeypatch, rolled_back=False, marker=marker, state=state)
+
+    compile_script.recover_from_interrupted_compile()
+
+    assert "2026-07-09.md" in state["ingested"]

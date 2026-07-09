@@ -71,3 +71,14 @@ def test_kb_functions_noop_without_repo(monkeypatch, tmp_path: Path) -> None:
     assert kb_git.kb_is_dirty() is False
     assert kb_git.kb_commit("x") is False
     assert kb_git.kb_rollback() is False
+
+
+def test_read_inflight_info_roundtrip(monkeypatch, tmp_path: Path) -> None:
+    _setup_kb(monkeypatch, tmp_path)
+    assert kb_git.read_inflight_info() is None
+    kb_git.mark_inflight("2026-07-09.md")
+    info = kb_git.read_inflight_info()
+    assert info["log"] == "2026-07-09.md"
+    assert "started" in info
+    kb_git.INFLIGHT_FILE.write_text("[1, 2]", encoding="utf-8")  # non-dict payload
+    assert kb_git.read_inflight_info() is None

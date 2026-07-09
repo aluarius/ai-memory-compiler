@@ -370,11 +370,14 @@ def _compiled_recently(entry: dict, now: datetime) -> bool:
     compiled_at = entry.get("compiled_at")
     if not compiled_at:
         return False
+    # TypeError covers naive timestamps: fromisoformat parses them fine, but
+    # aware-minus-naive subtraction raises — degrade to "not recent" instead
+    # of crashing the flush.
     try:
         last = datetime.fromisoformat(compiled_at)
-    except ValueError:
+        return (now - last) < timedelta(minutes=COMPILE_DEBOUNCE_MINUTES)
+    except (ValueError, TypeError):
         return False
-    return (now - last) < timedelta(minutes=COMPILE_DEBOUNCE_MINUTES)
 
 
 def maybe_trigger_compilation(now: datetime | None = None) -> None:

@@ -89,13 +89,20 @@ def mark_inflight(log_name: str) -> None:
     )
 
 
-def read_inflight() -> str | None:
+def read_inflight_info() -> dict | None:
+    """Full inflight marker payload ({log, started}) or None."""
     if not INFLIGHT_FILE.exists():
         return None
     try:
-        return json.loads(INFLIGHT_FILE.read_text(encoding="utf-8")).get("log")
+        data = json.loads(INFLIGHT_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def read_inflight() -> str | None:
+    info = read_inflight_info()
+    return info.get("log") if info else None
 
 
 def clear_inflight() -> None:

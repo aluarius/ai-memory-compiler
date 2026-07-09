@@ -433,3 +433,15 @@ def test_debounce_does_not_block_stale_past_logs(monkeypatch, tmp_path: Path) ->
     flush.maybe_trigger_compilation(now=now)
 
     assert len(spawned) == 1
+
+
+def test_compiled_recently_survives_naive_timestamp() -> None:
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).astimezone()
+
+    # naive compiled_at parses fine but aware-naive subtraction raises
+    # TypeError — must degrade to "not recent", never crash the flush
+    assert flush._compiled_recently({"compiled_at": "2026-07-09T22:00:00"}, now) is False
+    assert flush._compiled_recently({"compiled_at": "garbage"}, now) is False
+    assert flush._compiled_recently({}, now) is False

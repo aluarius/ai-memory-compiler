@@ -122,6 +122,9 @@ compile after this feature landed; it is invisible to the outer repo because
   failed log stays uncompiled and recompiles cleanly next trigger;
 - after a kill -9, the next compile run sees the stale marker and rolls back
   the partial writes automatically — no manual reconciliation pass needed;
+  if the dead run had already recorded the log as compiled in
+  `scripts/state.json` (killed between its state update and its kb commit),
+  the recovery drops that entry so the rolled-back content recompiles;
 - on success: `compile <log>` commit, then one `post-compile maintenance`
   commit for lint fixes / summary rewrite / archive-ref updates.
 
