@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+import kb_db
 from locking import file_lock
 from utils import safe_join
 
@@ -80,6 +81,24 @@ def list_articles() -> str:
 @mcp.tool()
 def search_knowledge(query: str) -> str:
     """Search knowledge base articles by keyword. Returns matching excerpts with article paths."""
+    try:
+        results = kb_db.search(query, limit=10)
+    except Exception:
+        results = None
+    if results is None:
+        # index missing/broken -> degrade to the linear scan
+        return _legacy_search(query)
+    if not results:
+        return f"No articles matching '{query}'. Use list_articles() to see what's available."
+    blocks = [
+        f"### [[{r['path']}]] — {r['title']}\n"
+        f"_{r['summary']}_ (updated {r['updated']})\n> {r['snippet']}"
+        for r in results
+    ]
+    return f"Found {len(results)} matching articles:\n\n" + "\n\n".join(blocks)
+
+
+def _legacy_search(query: str) -> str:
     query_lower = query.lower()
     keywords = query_lower.split()
     results: list[str] = []
