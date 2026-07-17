@@ -17,9 +17,14 @@ DEFAULT_RUNTIME_CONFIG = {
     # inherits the user's interactive default (e.g. Fable 5 after /model),
     # silently changing pipeline cost/behavior.
     "claude_model": "claude-opus-4-8",
+    # "tiered" feeds compile a relevance-selected index slice via kb_db
+    # (~7k tokens); "full" is the pre-FTS behavior (whole index, ~33k) —
+    # the revert knob if article quality degrades.
+    "compile_index_mode": "tiered",
 }
 
 VALID_RUNTIMES = {"claude", "codex"}
+VALID_INDEX_MODES = {"tiered", "full"}
 
 
 def load_runtime_config() -> dict:
@@ -51,6 +56,12 @@ def get_codex_model() -> str | None:
     config = load_runtime_config()
     model = config.get("codex_model")
     return str(model) if model else None
+
+
+def get_compile_index_mode() -> str:
+    config = load_runtime_config()
+    mode = config.get("compile_index_mode")
+    return mode if mode in VALID_INDEX_MODES else "tiered"
 
 
 def get_claude_model() -> str:

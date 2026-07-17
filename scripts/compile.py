@@ -19,6 +19,7 @@ import os
 import sys
 from pathlib import Path
 
+import kb_db
 from codex_exec import run_codex_prompt
 from config import (
     AGENTS_FILE,
@@ -41,7 +42,12 @@ from kb_git import (
     recover_interrupted_compile,
 )
 from locking import file_lock
-from runtime_config import get_claude_model, get_codex_model, get_task_runtime
+from runtime_config import (
+    get_claude_model,
+    get_codex_model,
+    get_compile_index_mode,
+    get_task_runtime,
+)
 from utils import (
     data_hash,
     file_hash,
@@ -122,6 +128,24 @@ def summarize_usage(usage) -> str | None:
     )
 
 
+def get_index_view(log_content: str) -> str:
+    """Index representation for the compile prompt.
+
+    Tiered mode selects relevant rows via the FTS index (~7k tokens vs ~33k
+    for the whole index.md); any failure degrades to the full index so a
+    broken sidecar DB can never break a compile.
+    """
+    if get_compile_index_mode() == "tiered":
+        try:
+            view = kb_db.compile_index_slice(log_content)
+            if view:
+                return view
+            print("  Warning: index slice unavailable, using full index")
+        except Exception as e:
+            print(f"  Warning: index slice failed ({e}), using full index")
+    return read_wiki_index()
+
+
 def build_log_section(log_name: str, mode: str) -> str:
     """Header of the 'Daily Log to Compile' prompt section."""
     header = f"**File:** {log_name}"
@@ -153,7 +177,7 @@ async def compile_daily_log(log_path: Path) -> float | None:
         print(f"  Incremental compile: {len(content_bytes)} new bytes (of {compiled_size})")
 
     schema = AGENTS_FILE.read_text(encoding="utf-8")
-    wiki_index = read_wiki_index()
+    wiki_index = get_index_view(log_content)
 
     timestamp = now_iso()
 
@@ -350,6 +374,15 @@ Read the daily log above and compile it into wiki articles following the schema 
     return cost
 
 
+def rebuild_search_index_best_effort() -> None:
+    """Refresh the FTS sidecar after the KB changed; never fails the compile."""
+    try:
+        count = kb_db.rebuild_index()
+        print(f"  Search index rebuilt: {count} articles")
+    except Exception as e:
+        print(f"  Warning: search index rebuild failed: {e}")
+
+
 def recover_from_interrupted_compile() -> None:
     """Roll back partial writes AND reconcile state after a mid-compile kill.
 
@@ -533,6 +566,7 @@ def main():
         run_summary_rewrite_best_effort()
         archive_old_logs()
         kb_commit("post-compile maintenance (lint fixes, index rewrite, archive)")
+        rebuild_search_index_best_effort()
         maybe_run_consolidation()
 
 

@@ -102,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     # Post-compile covers the normal path; this drains anything left over.
     # At 04:30 a locked keychain makes the LLM call fail harmlessly.
     run_step("index-rewrite", uv + [str(SCRIPTS_DIR / "index_rewrite.py")])
+    run_step("kb-index", uv + [str(SCRIPTS_DIR / "kb_db.py"), "rebuild"])
 
     if args.full_lint or now.weekday() == WEEKLY_FULL_LINT_WEEKDAY:
         run_step("lint-full", uv + [str(SCRIPTS_DIR / "lint.py")])

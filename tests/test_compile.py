@@ -81,6 +81,7 @@ def _wire_main(monkeypatch, tmp_path, compile_result):
     monkeypatch.setattr(compile_script, "archive_old_logs", lambda: None)
     monkeypatch.setattr(compile_script, "maybe_run_consolidation", lambda: None)
     monkeypatch.setattr(compile_script, "run_summary_rewrite_best_effort", lambda: None)
+    monkeypatch.setattr(compile_script, "rebuild_search_index_best_effort", lambda: None)
 
     async def fake_compile(path):
         calls.append(f"compile:{path.name}")
@@ -279,3 +280,50 @@ def test_extract_and_summarize_usage() -> None:
     assert compile_script.extract_usage(None) is None
     assert compile_script.extract_usage("garbage") is None
     assert compile_script.summarize_usage({}) is None
+
+
+# ---------------------------------------------------------------------------
+# Tiered compile index view
+# ---------------------------------------------------------------------------
+
+
+def test_get_index_view_tiered_uses_slice(monkeypatch) -> None:
+    monkeypatch.setattr(compile_script, "get_compile_index_mode", lambda: "tiered")
+    monkeypatch.setattr(
+        compile_script.kb_db, "compile_index_slice", lambda text: "SLICE for " + text[:10]
+    )
+
+    assert compile_script.get_index_view("day log text").startswith("SLICE")
+
+
+def test_get_index_view_falls_back_when_slice_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(compile_script, "get_compile_index_mode", lambda: "tiered")
+    monkeypatch.setattr(
+        compile_script.kb_db, "compile_index_slice", lambda text: None
+    )
+    monkeypatch.setattr(compile_script, "read_wiki_index", lambda: "FULL INDEX")
+
+    assert compile_script.get_index_view("day log text") == "FULL INDEX"
+
+
+def test_get_index_view_falls_back_on_exception(monkeypatch) -> None:
+    monkeypatch.setattr(compile_script, "get_compile_index_mode", lambda: "tiered")
+
+    def boom(text):
+        raise RuntimeError("db broken")
+
+    monkeypatch.setattr(compile_script.kb_db, "compile_index_slice", boom)
+    monkeypatch.setattr(compile_script, "read_wiki_index", lambda: "FULL INDEX")
+
+    assert compile_script.get_index_view("day log text") == "FULL INDEX"
+
+
+def test_get_index_view_full_mode(monkeypatch) -> None:
+    monkeypatch.setattr(compile_script, "get_compile_index_mode", lambda: "full")
+    monkeypatch.setattr(
+        compile_script.kb_db, "compile_index_slice",
+        lambda text: (_ for _ in ()).throw(AssertionError("must not be called")),
+    )
+    monkeypatch.setattr(compile_script, "read_wiki_index", lambda: "FULL INDEX")
+
+    assert compile_script.get_index_view("day log text") == "FULL INDEX"

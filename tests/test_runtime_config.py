@@ -74,3 +74,16 @@ def test_get_claude_model_default_and_override(monkeypatch, tmp_path: Path) -> N
     # Explicit null falls back to default
     config_path.write_text(json.dumps({"claude_model": None}), encoding="utf-8")
     assert runtime_config.get_claude_model() == "claude-opus-4-8"
+
+
+def test_get_compile_index_mode_default_and_validation(tmp_path, monkeypatch):
+    import runtime_config
+
+    monkeypatch.setattr(runtime_config, "RUNTIME_CONFIG_FILE", tmp_path / "rc.json")
+    assert runtime_config.get_compile_index_mode() == "tiered"
+
+    (tmp_path / "rc.json").write_text('{"compile_index_mode": "full"}', encoding="utf-8")
+    assert runtime_config.get_compile_index_mode() == "full"
+
+    (tmp_path / "rc.json").write_text('{"compile_index_mode": "bogus"}', encoding="utf-8")
+    assert runtime_config.get_compile_index_mode() == "tiered"
