@@ -253,3 +253,29 @@ def test_recovery_without_rollback_keeps_state(monkeypatch) -> None:
     compile_script.recover_from_interrupted_compile()
 
     assert "2026-07-09.md" in state["ingested"]
+
+
+def test_extract_and_summarize_usage() -> None:
+    usage = {
+        "input_tokens": 1200,
+        "cache_creation_input_tokens": 30000,
+        "cache_read_input_tokens": 250000,
+        "output_tokens": 8000,
+        "server_tool_use": {"web_search_requests": 0},  # noise -> dropped
+    }
+
+    extracted = compile_script.extract_usage(usage)
+
+    assert extracted == {
+        "input_tokens": 1200,
+        "cache_creation_input_tokens": 30000,
+        "cache_read_input_tokens": 250000,
+        "output_tokens": 8000,
+    }
+    summary = compile_script.summarize_usage(usage)
+    assert "cache_read=250,000" in summary
+    assert "output=8,000" in summary
+
+    assert compile_script.extract_usage(None) is None
+    assert compile_script.extract_usage("garbage") is None
+    assert compile_script.summarize_usage({}) is None

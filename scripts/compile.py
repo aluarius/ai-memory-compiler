@@ -90,6 +90,38 @@ def plan_compile_input(data: bytes, prev: dict | None) -> tuple[str, bytes]:
     return "incremental", data[size:]
 
 
+_USAGE_KEYS = (
+    "input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "output_tokens",
+)
+
+
+def extract_usage(usage) -> dict | None:
+    """Pick the token counters worth keeping from a ResultMessage usage blob.
+
+    Cost regressions are invisible without this: a cache-cold full compile
+    and a cache-warm one report the same $-figure shape but very different
+    token mixes.
+    """
+    if not isinstance(usage, dict):
+        return None
+    out = {k: usage[k] for k in _USAGE_KEYS if isinstance(usage.get(k), int)}
+    return out or None
+
+
+def summarize_usage(usage) -> str | None:
+    """One-line human summary of extract_usage, or None if nothing usable."""
+    data = extract_usage(usage)
+    if not data:
+        return None
+    return ", ".join(
+        f"{k.removesuffix('_input_tokens').removesuffix('_tokens')}={v:,}"
+        for k, v in data.items()
+    )
+
+
 def build_log_section(log_name: str, mode: str) -> str:
     """Header of the 'Daily Log to Compile' prompt section."""
     header = f"**File:** {log_name}"
@@ -197,6 +229,7 @@ Read the daily log above and compile it into wiki articles following the schema 
 """
 
     cost = 0.0
+    usage_tokens: dict | None = None
     runtime = get_task_runtime("compile")
     model = get_codex_model() if runtime == "codex" else get_claude_model()
     timeout_seconds = get_compile_timeout_seconds()
@@ -231,7 +264,7 @@ Read the daily log above and compile it into wiki articles following the schema 
             result_subtype: str | None = None
 
             async def run_claude_compile() -> None:
-                nonlocal cost, result_subtype
+                nonlocal cost, result_subtype, usage_tokens
                 async for message in query(
                     prompt=prompt,
                     options=ClaudeAgentOptions(
@@ -252,7 +285,11 @@ Read the daily log above and compile it into wiki articles following the schema 
                     elif isinstance(message, ResultMessage):
                         cost = message.total_cost_usd or 0.0
                         result_subtype = getattr(message, "subtype", None)
+                        usage_tokens = extract_usage(getattr(message, "usage", None))
                         print(f"  Cost: ${cost:.4f}")
+                        summary = summarize_usage(usage_tokens)
+                        if summary:
+                            print(f"  Tokens: {summary}")
 
             try:
                 async with asyncio.timeout(timeout_seconds):
@@ -288,7 +325,7 @@ Read the daily log above and compile it into wiki articles following the schema 
     rel_path = log_path.name
 
     def mutate(current_state: dict) -> None:
-        current_state.setdefault("ingested", {})[rel_path] = {
+        entry = {
             "hash": compiled_hash,
             "size": compiled_size,
             "compiled_at": now_iso(),
@@ -296,6 +333,9 @@ Read the daily log above and compile it into wiki articles following the schema 
             "processor_runtime": runtime,
             "model": model,
         }
+        if usage_tokens:
+            entry["tokens"] = usage_tokens
+        current_state.setdefault("ingested", {})[rel_path] = entry
         current_state["total_cost"] = current_state.get("total_cost", 0.0) + cost
 
     update_state(mutate)
