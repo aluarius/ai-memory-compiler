@@ -166,6 +166,7 @@ uv run python scripts/compile.py                     # compile new daily logs
 uv run python scripts/compile.py --dry-run            # preview what would compile
 uv run python scripts/lint.py --fix                   # mechanical KB repairs (free)
 uv run python scripts/lint.py --structural-only       # structural lint report (free)
+uv run python scripts/kb_db.py search "query"          # BM25 search over the FTS index (free)
 uv run python scripts/index_rewrite.py --dry-run       # list bloated index summaries (free)
 uv run python scripts/consolidate.py --dry-run         # list thin fold candidates (free)
 uv run python scripts/flush.py --retry-failed          # drain failed flush contexts

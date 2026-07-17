@@ -181,6 +181,33 @@ uv run python scripts/consolidate.py --dry-run   # list fold candidates, free
 uv run python scripts/consolidate.py             # run a pass (LLM, ~compile cost)
 ```
 
+## Search Index (SQLite + FTS5)
+
+`scripts/kb-index.sqlite` is a derived, disposable FTS5 index over the
+markdown KB (markdown stays the source of truth). It is rebuilt after every
+compile and in nightly maintenance; rebuild takes seconds:
+
+```bash
+uv run python scripts/kb_db.py rebuild
+uv run python scripts/kb_db.py search "nginx stale inode"
+```
+
+Consumers and their fallbacks:
+
+- **MCP `search_knowledge`** — BM25-ranked (title×10, summary×5, body×1)
+  with snippets; falls back to the old linear scan when the DB is missing
+  or broken.
+- **Compile prompt** — `compile_index_mode: "tiered"` (runtime-config,
+  default) feeds the LLM a relevance-selected slice (recently updated rows +
+  FTS candidates matched against the day log + top hubs, ~5k tokens instead
+  of ~28k for the full index) plus an instruction to Grep the full index
+  before creating new articles. Set `"compile_index_mode": "full"` in
+  `scripts/runtime-config.json` to revert to the old whole-index prompt if
+  article quality degrades (watch for duplicate articles that a full index
+  would have prevented).
+
+A stale or corrupt index can only degrade ranking, never break the pipeline.
+
 ## Compilation Triggers
 
 `compile.py` runs in three ways:
