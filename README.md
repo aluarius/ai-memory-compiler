@@ -70,6 +70,14 @@ Add these entries inside the top-level `"hooks"` object:
 > the desktop app doesn't source your shell profile). Use an absolute path in
 > the hook command: `/opt/homebrew/bin/uv run python hooks/session-start.py`
 > (`which uv` shows yours).
+>
+> `Stop hook (failed) — No such file or directory (os error 2)` from Codex
+> usually means the session's working directory no longer exists (the project
+> folder was renamed or deleted mid-session) — spawning any child process
+> then fails. The hook config is fine; restart the session in the new
+> location. Turns after the last successful flush stay in the session's
+> rollout under `~/.codex/sessions/` and can be imported manually with
+> `scripts/import_session.py` if they mattered.
 
 ### Codex
 
