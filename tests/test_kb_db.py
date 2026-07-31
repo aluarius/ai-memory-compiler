@@ -120,3 +120,131 @@ def test_compile_index_slice_none_without_db(monkeypatch, tmp_path: Path) -> Non
     _setup_kb(monkeypatch, tmp_path)
 
     assert kb_db.compile_index_slice("text", db_path=tmp_path / "missing.sqlite") is None
+
+
+def test_find_similar_pairs_returns_mutual_neighbours(monkeypatch, tmp_path: Path) -> None:
+    knowledge_dir = tmp_path / "knowledge"
+    concepts = knowledge_dir / "concepts"
+    concepts.mkdir(parents=True)
+
+    # two articles on the same topic, one unrelated
+    (concepts / "presence-system.md").write_text(
+        '---\ntitle: "Online Presence System"\n---\n\n'
+        "Online presence counters track logged-in players via the online table.\n",
+        encoding="utf-8",
+    )
+    (concepts / "presence-audit.md").write_text(
+        '---\ntitle: "Online Presence Audit"\n---\n\n'
+        "Audit of online presence counters comparing the online table to legacy.\n",
+        encoding="utf-8",
+    )
+    (concepts / "pastry-recipes.md").write_text(
+        '---\ntitle: "Pastry Recipes"\n---\n\nButter flour sugar baking temperatures.\n',
+        encoding="utf-8",
+    )
+    (knowledge_dir / "index.md").write_text(HEADER + "\n".join([
+        "| [[concepts/presence-system]] | presence counters | daily/a.md | 2026-05-26 |",
+        "| [[concepts/presence-audit]] | presence audit | daily/b.md | 2026-05-27 |",
+        "| [[concepts/pastry-recipes]] | baking | daily/c.md | 2026-05-01 |",
+    ]) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(kb_db, "KNOWLEDGE_DIR", knowledge_dir)
+    monkeypatch.setattr(kb_db, "INDEX_FILE", knowledge_dir / "index.md")
+    monkeypatch.setattr(kb_db, "list_wiki_articles", lambda: sorted(concepts.glob("*.md")))
+    db = tmp_path / "kb.sqlite"
+    kb_db.rebuild_index(db_path=db)
+
+    pairs = kb_db.find_similar_pairs(db_path=db)
+
+    assert pairs is not None
+    assert len(pairs) == 1
+    a, b = pairs[0]["a"], pairs[0]["b"]
+    assert {a, b} == {"concepts/presence-system", "concepts/presence-audit"}
+    assert pairs[0]["linked"] is False  # neither wikilinks the other
+    # BM25 IDF goes non-positive when a term appears in most of a tiny corpus,
+    # so only the ordering of scores is meaningful here, not their sign.
+    assert isinstance(pairs[0]["score"], float)
+
+
+def test_find_similar_pairs_marks_already_linked(monkeypatch, tmp_path: Path) -> None:
+    knowledge_dir = tmp_path / "knowledge"
+    concepts = knowledge_dir / "concepts"
+    concepts.mkdir(parents=True)
+    (concepts / "alpha.md").write_text(
+        '---\ntitle: "Dungeon Runtime"\n---\n\nDungeon runtime tables and instances.\n'
+        "See [[concepts/beta]].\n", encoding="utf-8",
+    )
+    (concepts / "beta.md").write_text(
+        '---\ntitle: "Dungeon Bots"\n---\n\nDungeon runtime bot instances and tables.\n'
+        "See [[concepts/alpha]].\n", encoding="utf-8",
+    )
+    (knowledge_dir / "index.md").write_text(HEADER + "\n".join([
+        "| [[concepts/alpha]] | dungeon runtime | daily/a.md | 2026-06-01 |",
+        "| [[concepts/beta]] | dungeon bots | daily/b.md | 2026-06-02 |",
+    ]) + "\n", encoding="utf-8")
+    monkeypatch.setattr(kb_db, "KNOWLEDGE_DIR", knowledge_dir)
+    monkeypatch.setattr(kb_db, "INDEX_FILE", knowledge_dir / "index.md")
+    monkeypatch.setattr(kb_db, "list_wiki_articles", lambda: sorted(concepts.glob("*.md")))
+    db = tmp_path / "kb.sqlite"
+    kb_db.rebuild_index(db_path=db)
+
+    pairs = kb_db.find_similar_pairs(db_path=db)
+
+    assert pairs and pairs[0]["linked"] is True
+
+
+def test_find_similar_pairs_none_without_db(tmp_path: Path) -> None:
+    assert kb_db.find_similar_pairs(db_path=tmp_path / "missing.sqlite") is None
+
+
+def test_find_similar_pairs_separates_strong_from_weak_overlap(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Both pairs are mutually-nearest, so rank-only scoring ties them and the
+    top-N degenerates into an alphabetical slice. A near-verbatim pair must
+    outscore a pair sharing only one term."""
+    knowledge_dir = tmp_path / "knowledge"
+    concepts = knowledge_dir / "concepts"
+    concepts.mkdir(parents=True)
+    # Three mutually-nearest pairs of decreasing overlap. Rank-based scoring
+    # gives all three the same value (each side is the other's top hit), which
+    # is exactly the degeneracy this guards against.
+    specs = {
+        "aa-strong-one": "dungeon runtime instance tables spawn rows registry cleanup",
+        "ab-strong-two": "dungeon runtime instance tables spawn rows registry cleanup",
+        "mm-medium-one": "payment ledger operation alpha beta gamma delta epsilon",
+        "mn-medium-two": "payment ledger operation zeta eta theta iota kappa",
+        "zy-weak-one": "cron alpha1 beta1 gamma1 delta1 epsilon1 zeta1 eta1",
+        "zz-weak-two": "cron theta1 iota1 kappa1 lambda1 mu1 nu1 xi1",
+    }
+    rows = []
+    for slug, body in specs.items():
+        (concepts / f"{slug}.md").write_text(
+            f'---\ntitle: "{slug}"\n---\n\n{body}\n', encoding="utf-8"
+        )
+        # the summary IS the similarity profile — put the overlap there
+        rows.append(f"| [[concepts/{slug}]] | {body} | daily/a.md | 2026-06-01 |")
+    # filler documents so BM25 IDF stays positive (a term shared by most of a
+    # tiny corpus scores ~0 and would flatten every pair)
+    for i in range(12):
+        slug = f"filler-{i:02d}"
+        text = f"unrelated{i} filler{i} content{i} topic{i} noise{i}"
+        (concepts / f"{slug}.md").write_text(
+            f'---\ntitle: "{slug}"\n---\n\n{text}\n', encoding="utf-8"
+        )
+        rows.append(f"| [[concepts/{slug}]] | {text} | daily/a.md | 2026-06-01 |")
+    (knowledge_dir / "index.md").write_text(HEADER + "\n".join(rows) + "\n", encoding="utf-8")
+    monkeypatch.setattr(kb_db, "KNOWLEDGE_DIR", knowledge_dir)
+    monkeypatch.setattr(kb_db, "INDEX_FILE", knowledge_dir / "index.md")
+    monkeypatch.setattr(kb_db, "list_wiki_articles", lambda: sorted(concepts.glob("*.md")))
+    db = tmp_path / "kb.sqlite"
+    kb_db.rebuild_index(db_path=db)
+
+    pairs = kb_db.find_similar_pairs(db_path=db)
+    by_pair = {tuple(sorted((p["a"], p["b"]))): p["score"] for p in pairs}
+
+    strong = by_pair[("concepts/aa-strong-one", "concepts/ab-strong-two")]
+    medium = by_pair[("concepts/mm-medium-one", "concepts/mn-medium-two")]
+    weak = by_pair[("concepts/zy-weak-one", "concepts/zz-weak-two")]
+    assert strong > medium > weak, f"{strong=} {medium=} {weak=} must be ordered"
+    assert [p["score"] for p in pairs] == sorted((p["score"] for p in pairs), reverse=True)

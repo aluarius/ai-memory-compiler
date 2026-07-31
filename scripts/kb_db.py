@@ -185,6 +185,90 @@ def _today() -> str:
     return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
 
 
+PAIR_NEIGHBOURS = 5
+PAIR_PROFILE_TERMS = 25
+
+
+def find_similar_pairs(
+    limit: int = 20,
+    db_path: Path | None = None,
+    neighbours: int = PAIR_NEIGHBOURS,
+) -> list[dict] | None:
+    """Mutually-nearest article pairs — the real consolidation candidates.
+
+    Thin articles stopped being the growth problem long ago (the compiler
+    schema forbids stubs, so nothing lands under the sparse threshold);
+    what actually accumulates is *topic overlap* — two articles circling the
+    same subject, sometimes without even linking to each other. Mutual
+    nearest-neighbourhood in the FTS index is a cheap, embedding-free signal
+    for exactly that: A must rank B highly AND B must rank A highly.
+
+    Pair strength is the combined BM25 relevance of the two directed matches,
+    not their rank positions: ranks bucket everything into a handful of values
+    (observed: 3 distinct scores across 200 real pairs), which silently turns
+    any top-N into an alphabetical slice.
+
+    Returns pairs sorted by combined strength; `linked` says whether they
+    already wikilink each other (link-only fixes are much cheaper than a
+    merge). None when the index is unusable.
+    """
+    db_path = db_path or DB_FILE
+    if not Path(db_path).exists():
+        return None
+    try:
+        conn = _connect(db_path)
+        try:
+            rows = conn.execute("SELECT path, title, summary FROM articles").fetchall()
+            # path -> {neighbour: bm25 relevance (higher = closer)}
+            neighbours_of: dict[str, dict[str, float]] = {}
+            for path, title, summary in rows:
+                profile = _fts_query(f"{title} {summary}", max_terms=PAIR_PROFILE_TERMS)
+                if not profile:
+                    continue
+                hits = conn.execute(
+                    "SELECT path, bm25(articles_fts, "
+                    f"{_BM25_WEIGHTS}) AS relevance FROM articles_fts"
+                    " WHERE articles_fts MATCH ? ORDER BY relevance LIMIT ?",
+                    (profile, neighbours + 1),
+                ).fetchall()
+                neighbours_of[path] = {
+                    other: -relevance  # bm25 is negative; flip so higher = closer
+                    for other, relevance in hits
+                    if other != path
+                }
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+    pairs: list[dict] = []
+    for a, near_a in neighbours_of.items():
+        for b, relevance_ab in near_a.items():
+            if b <= a:  # emit each unordered pair once
+                continue
+            relevance_ba = neighbours_of.get(b, {}).get(a)
+            if relevance_ba is None:  # not mutual -> weak signal, skip
+                continue
+            score = round((relevance_ab + relevance_ba) / 2, 3)
+            pairs.append({"a": a, "b": b, "score": score})
+
+    pairs.sort(key=lambda p: (-p["score"], p["a"]))
+    top = pairs[:limit]
+    # link check reads both articles, so only pay for the pairs we return
+    for pair in top:
+        pair["linked"] = _pair_is_linked(pair["a"], pair["b"])
+    return top
+
+
+def _pair_is_linked(a: str, b: str) -> bool:
+    """True if either article wikilinks the other."""
+    for src, dst in ((a, b), (b, a)):
+        path = KNOWLEDGE_DIR / f"{src}.md"
+        if path.exists() and f"[[{dst}]]" in path.read_text(encoding="utf-8"):
+            return True
+    return False
+
+
 def compile_index_slice(
     log_text: str,
     db_path: Path | None = None,

@@ -1,11 +1,18 @@
-"""Monthly consolidation pass: fold thin articles into hub articles.
+"""Monthly consolidation pass: merge or cross-link overlapping articles.
 
-Candidates are selected mechanically (sparse articles that stopped growing);
-an LLM agent folds their content into related hubs and records deletions in
-a manifest; the script applies deletions deterministically, verifies
-structure, and rolls the whole pass back via the knowledge/ git repo when
-verification fails. This is the "sleep" phase that keeps the KB dense as it
-approaches the ~500-article scale ceiling of index-based retrieval.
+Candidates are mutually-nearest article pairs from the FTS index (see
+kb_db.find_similar_pairs); an LLM agent decides FOLD / LINK / KEEP per pair,
+records merges in a deletion manifest, and the script applies deletions
+deterministically, verifies structure, and rolls the whole pass back via the
+knowledge/ git repo when verification fails. This is the "sleep" phase that
+keeps the KB dense as it approaches the ~500-article scale ceiling of
+index-based retrieval.
+
+The original sparse-article rule was dead on arrival: the compiler schema
+mandates 3-5 key points and 2+ detail paragraphs, so nothing ever lands
+under a 200-word threshold (observed minimum: 214 words across 449
+articles). Topic overlap, not article thinness, is what actually
+accumulates.
 
 Usage:
     uv run python scripts/consolidate.py             # run one pass
@@ -17,9 +24,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import kb_db
 from codex_exec import run_codex_prompt
 from compile import get_compile_timeout_seconds
 from config import (
@@ -38,7 +45,6 @@ from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from utils import (
     INDEX_ROW_RE,
     extract_wikilinks,
-    get_article_word_count,
     list_wiki_articles,
     read_wiki_index,
     update_state,
@@ -46,9 +52,7 @@ from utils import (
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MANIFEST_FILE = REPORTS_DIR / "consolidate-manifest.txt"
-MAX_CANDIDATES = 15
-SPARSE_WORDS = 200
-MIN_AGE_DAYS = 14
+MAX_CANDIDATES = 12
 
 _DELETE_LINE_RE = re.compile(r"^DELETE\s+((?:concepts|connections|qa)/[\w-]+)$")
 
@@ -65,43 +69,53 @@ def _index_updated_dates() -> dict[str, str]:
 
 
 def select_candidates(max_candidates: int = MAX_CANDIDATES) -> list[dict]:
-    """Sparse articles (<SPARSE_WORDS words) not touched in MIN_AGE_DAYS days.
+    """Overlapping article pairs from the FTS index, strongest overlap first.
 
-    Recently-updated thin articles are excluded — they may still grow
-    naturally through compiles; folding them would be premature.
+    Empty (a no-op pass) when the index is unusable or nothing overlaps —
+    consolidation must never invent work.
     """
-    cutoff = (
-        datetime.now(timezone.utc).astimezone() - timedelta(days=MIN_AGE_DAYS)
-    ).strftime("%Y-%m-%d")
+    pairs = kb_db.find_similar_pairs(limit=max_candidates * 2)
+    if not pairs:
+        return []
     dates = _index_updated_dates()
     candidates = []
-    for article in list_wiki_articles():
-        words = get_article_word_count(article)
-        if words >= SPARSE_WORDS:
+    for pair in pairs:
+        a, b = pair["a"], pair["b"]
+        if not all((KNOWLEDGE_DIR / f"{p}.md").exists() for p in (a, b)):
             continue
-        rel = str(article.relative_to(KNOWLEDGE_DIR)).replace(".md", "").replace("\\", "/")
-        updated = dates.get(rel, "")
-        if updated >= cutoff:
-            continue
-        candidates.append({"target": rel, "words": words, "updated": updated or "(unindexed)"})
-    candidates.sort(key=lambda c: c["words"])
-    return candidates[:max_candidates]
+        candidates.append({
+            "a": a,
+            "b": b,
+            "score": pair["score"],
+            "linked": pair["linked"],
+            "updated_a": dates.get(a, "(unindexed)"),
+            "updated_b": dates.get(b, "(unindexed)"),
+        })
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
+def _pair_block(c: dict) -> str:
+    parts = [
+        f"### PAIR (overlap score {c['score']}, "
+        f"already cross-linked: {'yes' if c['linked'] else 'no'})"
+    ]
+    for side, updated in ((c["a"], c["updated_a"]), (c["b"], c["updated_b"])):
+        body = (KNOWLEDGE_DIR / f"{side}.md").read_text(encoding="utf-8")
+        parts.append(f"#### {side} (updated {updated})\n\n{body}")
+    return "\n\n".join(parts)
 
 
 def build_consolidation_prompt(candidates: list[dict]) -> str:
     schema = AGENTS_FILE.read_text(encoding="utf-8")
     index = read_wiki_index()
-    blocks = []
-    for c in candidates:
-        path = KNOWLEDGE_DIR / f"{c['target']}.md"
-        blocks.append(
-            f"### {c['target']} ({c['words']} words, updated {c['updated']})\n\n"
-            + path.read_text(encoding="utf-8")
-        )
-    joined = "\n\n---\n\n".join(blocks)
+    joined = "\n\n---\n\n".join(_pair_block(c) for c in candidates)
     return f"""You are the consolidation pass of a knowledge-base compiler.
-Thin articles accumulate over time; your job is to fold them into stronger
-hub articles so the knowledge base stays dense and navigable.
+The pairs below were flagged as overlapping by full-text similarity. Your job
+is to keep the knowledge base dense and navigable: genuinely duplicated topics
+should become one article, genuinely distinct-but-related ones should at least
+know about each other.
 
 ## Schema (AGENTS.md)
 
@@ -111,18 +125,27 @@ hub articles so the knowledge base stays dense and navigable.
 
 {index}
 
-## Fold Candidates (thin articles, full content)
+## Overlapping Pairs (full content of both sides)
 
 {joined}
 
 ## Your Task
 
-For EACH candidate decide: FOLD into an existing, semantically related hub
-article, or KEEP as-is (only if genuinely distinct and likely to keep growing).
+For EACH pair choose exactly one verdict:
 
-When folding [[X]] into hub [[H]]:
-1. Edit the hub article under {KNOWLEDGE_DIR}: merge X's real content (no
-   filler), add X's sources to the hub's frontmatter sources list.
+- **FOLD** — the two cover the same subject; merge the weaker/narrower one
+  into the stronger one.
+- **LINK** — related but genuinely distinct subjects that do not reference
+  each other; add one meaningful Related Concepts link in each direction
+  (skip if they are already cross-linked — then it is KEEP).
+- **KEEP** — distinct enough and already discoverable; change nothing.
+
+Prefer KEEP over LINK and LINK over FOLD when uncertain: an unnecessary merge
+destroys detail, while a missing merge only costs some redundancy.
+
+When FOLDing [[X]] into [[H]]:
+1. Edit [[H]] under {KNOWLEDGE_DIR}: merge X's real content (no filler), add
+   X's sources to H's frontmatter sources list.
 2. Update every article that links to [[X]] to link to [[H]] instead
    (grep the knowledge directory for the link target).
 3. Update H's row in {INDEX_FILE} (summary <= 200 chars, updated = today).
@@ -130,14 +153,13 @@ When folding [[X]] into hub [[H]]:
 4. Append one line to {MANIFEST_FILE} (create it if missing), bare target only:
    DELETE concepts/x
 
-When keeping a candidate, change nothing about it.
-
 Finally append ONE entry to {LOG_FILE}:
 ## [{now_iso()}] consolidate
 - Folded: [[concepts/x]] -> [[concepts/hub]], ... (or 'none')
+- Linked: [[concepts/a]] <-> [[concepts/b]], ... (or 'none')
 - Kept: [[concepts/y]] (short reason), ...
 
-Do not create new articles. Do not touch articles unrelated to the folds."""
+Do not create new articles. Do not touch articles outside the pairs above."""
 
 
 def _remove_index_row(target: str) -> None:
@@ -252,10 +274,10 @@ async def run_consolidation() -> bool:
     """
     candidates = select_candidates()
     if not candidates:
-        print("  Consolidation: no candidates.")
+        print("  Consolidation: no overlapping pairs.")
         _record_consolidation()
         return True
-    print(f"  Consolidation: {len(candidates)} candidate(s)")
+    print(f"  Consolidation: {len(candidates)} overlapping pair(s)")
 
     ensure_kb_repo()
     kb_commit("checkpoint before consolidation")
@@ -291,14 +313,17 @@ async def run_consolidation() -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fold thin articles into hubs")
+    parser = argparse.ArgumentParser(description="Merge or cross-link overlapping articles")
     parser.add_argument("--dry-run", action="store_true",
-                        help="List fold candidates without calling the LLM")
+                        help="List overlapping pairs without calling the LLM")
     args = parser.parse_args()
 
     if args.dry_run:
-        for c in select_candidates():
-            print(f"{c['words']:4d} words  {c['target']}  (updated {c['updated']})")
+        candidates = select_candidates()
+        for c in candidates:
+            link = "linked" if c["linked"] else "UNLINKED"
+            print(f"{c['score']:5.2f}  {link:8}  {c['a']}  <>  {c['b']}")
+        print(f"{len(candidates)} overlapping pair(s)")
         return 0
 
     with file_lock(LOCKS_DIR / "compile.lock"):

@@ -158,15 +158,23 @@ uv run python scripts/index_rewrite.py             # rewrite (LLM)
 
 ## Consolidation Pass
 
-`consolidate.py` is the monthly "sleep" phase: it folds thin articles into
-hub articles so the KB stays dense as it approaches the ~500-article scale
-ceiling of index-based retrieval.
+`consolidate.py` is the monthly "sleep" phase: it merges or cross-links
+overlapping articles so the KB stays dense as it approaches the ~500-article
+scale ceiling of index-based retrieval.
 
-- Candidates: articles under 200 words whose index row is older than 14 days
-  (capped at 15 per pass).
-- The LLM agent merges candidate content into hubs and records deletions in
-  `reports/consolidate-manifest.txt` (`DELETE concepts/x` lines); it never
-  deletes files itself.
+- Candidates: mutually-nearest article pairs from the FTS index, ranked by
+  combined BM25 strength (capped at 12 pairs per pass). Inspect them for free
+  with `--dry-run`; `UNLINKED` marks pairs that do not even reference each
+  other.
+- The original rule (articles under 200 words, untouched for 14 days) was
+  dead on arrival: the compiler schema mandates 3-5 key points and 2+ detail
+  paragraphs, so nothing ever lands that thin (observed minimum: 214 words
+  across 449 articles) and every pass was a no-op. Topic overlap, not article
+  thinness, is what actually accumulates.
+- Per pair the LLM agent picks FOLD (merge duplicates), LINK (add reciprocal
+  Related Concepts links) or KEEP, biased toward the cheaper verdict when
+  uncertain. Merges are recorded in `reports/consolidate-manifest.txt`
+  (`DELETE concepts/x` lines); the agent never deletes files itself.
 - The script applies the manifest with a path allowlist and an inbound-link
   guard, then runs structural checks; on errors the whole pass is rolled back
   via the knowledge git repo.
@@ -177,7 +185,7 @@ ceiling of index-based retrieval.
 Manual:
 
 ```bash
-uv run python scripts/consolidate.py --dry-run   # list fold candidates, free
+uv run python scripts/consolidate.py --dry-run   # list overlapping pairs, free
 uv run python scripts/consolidate.py             # run a pass (LLM, ~compile cost)
 ```
 

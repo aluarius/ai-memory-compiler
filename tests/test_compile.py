@@ -132,34 +132,38 @@ def test_main_rolls_back_on_failed_compile(monkeypatch, tmp_path) -> None:
     assert not any(c == "kb_commit:compile 2026-07-01.md" for c in calls)
 
 
-def test_maybe_run_consolidation_respects_interval(monkeypatch) -> None:
+def _consolidation_ran(monkeypatch, days_ago: float) -> list:
+    """Run maybe_run_consolidation with last_consolidation `days_ago` in the past.
+
+    Relative, not absolute, dates: a hardcoded timestamp silently starts
+    failing once real time passes the interval.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    last = datetime.now(timezone.utc).astimezone() - timedelta(days=days_ago)
     ran = []
     monkeypatch.setattr(
         compile_script, "load_state",
-        lambda: {"last_consolidation": "2026-07-01T10:00:00+05:00"},
+        lambda: {"last_consolidation": last.isoformat()},
     )
     monkeypatch.setattr(
         compile_script, "_run_consolidation_pass", lambda: ran.append(True)
     )
 
     compile_script.maybe_run_consolidation()
+    return ran
 
-    assert ran == []
+
+def test_maybe_run_consolidation_respects_interval(monkeypatch) -> None:
+    fresh = compile_script.CONSOLIDATION_INTERVAL_DAYS - 1
+
+    assert _consolidation_ran(monkeypatch, fresh) == []
 
 
 def test_maybe_run_consolidation_runs_when_stale(monkeypatch) -> None:
-    ran = []
-    monkeypatch.setattr(
-        compile_script, "load_state",
-        lambda: {"last_consolidation": "2026-01-01T10:00:00+05:00"},
-    )
-    monkeypatch.setattr(
-        compile_script, "_run_consolidation_pass", lambda: ran.append(True)
-    )
+    stale = compile_script.CONSOLIDATION_INTERVAL_DAYS + 1
 
-    compile_script.maybe_run_consolidation()
-
-    assert ran == [True]
+    assert _consolidation_ran(monkeypatch, stale) == [True]
 
 
 # ---------------------------------------------------------------------------
