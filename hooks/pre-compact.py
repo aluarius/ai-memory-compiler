@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Recursion guard
-if os.environ.get("CLAUDE_INVOKED_BY"):
+if os.environ.get("CLAUDE_INVOKED_BY") or os.environ.get("MEMORY_COMPILER_INTERNAL"):
     sys.exit(0)
 
 ROOT = Path(__file__).resolve().parent.parent

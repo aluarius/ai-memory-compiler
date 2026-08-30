@@ -27,6 +27,7 @@ class TranscriptParseResult:
     context: str
     turn_count: int
     format: str
+    message_count: int = 0
     session_id: str | None = None
     provider: str | None = None
     model: str | None = None
@@ -62,6 +63,22 @@ def _normalize_codex_content(content: object) -> str:
     return ""
 
 
+def _codex_message_from_entry(entry: dict) -> tuple[str, str] | None:
+    """Return a normalized user/assistant message from a Codex response item."""
+    if entry.get("type") != "response_item":
+        return None
+    payload = entry.get("payload", {})
+    if not isinstance(payload, dict) or payload.get("type") != "message":
+        return None
+
+    role = payload.get("role", "")
+    if role not in {"user", "assistant"}:
+        return None
+
+    text = _normalize_codex_content(payload.get("content", "")).strip()
+    return (role, text) if text else None
+
+
 def _trim_context(turns: list[str], *, max_turns: int, max_chars: int) -> tuple[str, int]:
     recent = turns[-max_turns:]
     context = "\n".join(recent)
@@ -73,6 +90,66 @@ def _trim_context(turns: list[str], *, max_turns: int, max_chars: int) -> tuple[
             context = context[boundary + 1 :]
 
     return context, len(recent)
+
+
+def codex_message_ranges(
+    transcript_path: Path,
+    *,
+    after_message_count: int = 0,
+    until_message_count: int | None = None,
+    max_turns: int,
+    max_chars: int,
+) -> tuple[int, list[tuple[int, int]]]:
+    """Split unseen Codex messages into contiguous ranges that the importer can retain.
+
+    Range bounds are checkpoint counts: ``(4, 6)`` means messages 5 and 6.
+    A single oversized message remains a one-message range because it cannot be
+    split without changing the source transcript's meaning.
+    """
+    message_count = 0
+    ranges: list[tuple[int, int]] = []
+    chunk_after = max(after_message_count, 0)
+    chunk_turns = 0
+    chunk_chars = 0
+
+    with open(transcript_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+
+            message = _codex_message_from_entry(entry)
+            if message is None:
+                continue
+            message_count += 1
+            if message_count <= chunk_after:
+                continue
+            if until_message_count is not None and message_count > until_message_count:
+                break
+
+            role, text = message
+            label = "User" if role == "user" else "Assistant"
+            rendered_size = len(f"**{label}:** {text}\n") + (1 if chunk_turns else 0)
+            if chunk_turns and (
+                chunk_turns >= max_turns or chunk_chars + rendered_size > max_chars
+            ):
+                ranges.append((chunk_after, message_count - 1))
+                chunk_after = message_count - 1
+                chunk_turns = 0
+                chunk_chars = 0
+
+            chunk_turns += 1
+            chunk_chars += rendered_size
+
+    if chunk_turns:
+        ranges.append((chunk_after, min(message_count, until_message_count or message_count)))
+    return message_count, ranges
 
 
 _FORMAT_PROBE_LINES = 50
@@ -160,8 +237,11 @@ def _parse_codex_jsonl(
     *,
     max_turns: int,
     max_chars: int,
+    after_message_count: int = 0,
+    until_message_count: int | None = None,
 ) -> TranscriptParseResult:
     turns: list[str] = []
+    message_count = 0
     session_id: str | None = None
     provider: str | None = None
     model: str | None = None
@@ -197,20 +277,17 @@ def _parse_codex_jsonl(
                 cwd = payload.get("cwd") or cwd
                 continue
 
-            if entry_type != "response_item" or not isinstance(payload, dict):
+            message = _codex_message_from_entry(entry)
+            if message is None:
                 continue
 
-            if payload.get("type") != "message":
+            message_count += 1
+            if message_count <= after_message_count:
+                continue
+            if until_message_count is not None and message_count > until_message_count:
                 continue
 
-            role = payload.get("role", "")
-            if role not in {"user", "assistant"}:
-                continue
-
-            text = _normalize_codex_content(payload.get("content", "")).strip()
-            if not text:
-                continue
-
+            role, text = message
             label = "User" if role == "user" else "Assistant"
             turns.append(f"**{label}:** {text}\n")
 
@@ -219,6 +296,7 @@ def _parse_codex_jsonl(
         context=context,
         turn_count=count,
         format="codex_jsonl",
+        message_count=message_count,
         session_id=session_id,
         provider=provider,
         model=model,
@@ -232,12 +310,20 @@ def parse_transcript(
     *,
     max_turns: int,
     max_chars: int,
+    after_message_count: int = 0,
+    until_message_count: int | None = None,
 ) -> TranscriptParseResult:
     """Parse a supported transcript file into normalized context."""
     transcript_format = detect_transcript_format(transcript_path)
 
     if transcript_format == "codex_jsonl":
-        return _parse_codex_jsonl(transcript_path, max_turns=max_turns, max_chars=max_chars)
+        return _parse_codex_jsonl(
+            transcript_path,
+            max_turns=max_turns,
+            max_chars=max_chars,
+            after_message_count=after_message_count,
+            until_message_count=until_message_count,
+        )
     if transcript_format == "claude_jsonl":
         return _parse_claude_jsonl(transcript_path, max_turns=max_turns, max_chars=max_chars)
 

@@ -109,18 +109,73 @@ def test_claim_import_key_is_deduplicated(tmp_path: Path) -> None:
     assert codex_stop.claim_import_key("session:a:turn:b") is False
 
 
-def test_claim_import_key_rate_limits_same_session(tmp_path: Path, monkeypatch) -> None:
+def test_claim_import_key_allows_distinct_turns_from_the_same_session(tmp_path: Path, monkeypatch) -> None:
     codex_stop = load_codex_stop_module()
     codex_stop.DEDUP_FILE = tmp_path / ".last-codex-import.json"
     codex_stop.DEDUP_LOCK_FILE = tmp_path / ".locks" / "codex-stop.lock"
-    codex_stop.MIN_SESSION_IMPORT_INTERVAL = 60
 
     monkeypatch.setattr(codex_stop.time, "time", lambda: 1_000)
 
     assert codex_stop.claim_import_key("session:a:turn:1", session_id="a") is True
-    assert codex_stop.claim_import_key("session:a:turn:2", session_id="a") is False
+    assert codex_stop.claim_import_key("session:a:turn:2", session_id="a") is True
     assert codex_stop.claim_import_key("session:b:turn:1", session_id="b") is True
 
-    monkeypatch.setattr(codex_stop.time, "time", lambda: 1_061)
 
-    assert codex_stop.claim_import_key("session:a:turn:3", session_id="a") is True
+def test_reserve_import_uses_the_previous_message_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    codex_stop = load_codex_stop_module()
+    codex_stop.DEDUP_FILE = tmp_path / ".last-codex-import.json"
+    codex_stop.DEDUP_LOCK_FILE = tmp_path / ".locks" / "codex-stop.lock"
+    monkeypatch.setattr(codex_stop.time, "time", lambda: 1_000)
+    first = codex_stop.reserve_import("session:a:turn:1", session_id="a", message_count=4)
+
+    assert first is not None
+    assert first.after_message_count == 0
+    assert first.until_message_count == 4
+
+    second = codex_stop.reserve_import("session:a:turn:2", session_id="a", message_count=6)
+
+    assert second is not None
+    assert second.after_message_count == 4
+    assert second.until_message_count == 6
+
+
+def test_release_import_restores_the_checkpoint_after_spawn_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    codex_stop = load_codex_stop_module()
+    codex_stop.DEDUP_FILE = tmp_path / ".last-codex-import.json"
+    codex_stop.DEDUP_LOCK_FILE = tmp_path / ".locks" / "codex-stop.lock"
+    monkeypatch.setattr(codex_stop.time, "time", lambda: 1_000)
+
+    reservation = codex_stop.reserve_import(
+        "session:a:turn:1", session_id="a", message_count=4
+    )
+    assert reservation is not None
+
+    codex_stop.release_import("session:a:turn:1", session_id="a", reservation=reservation)
+    retry = codex_stop.reserve_import("session:a:turn:2", session_id="a", message_count=4)
+
+    assert retry is not None
+    assert retry.after_message_count == 0
+    assert retry.until_message_count == 4
+
+
+def test_build_import_command_forwards_the_reserved_message_range(tmp_path: Path) -> None:
+    codex_stop = load_codex_stop_module()
+    transcript = tmp_path / "rollout-test.jsonl"
+
+    cmd = codex_stop.build_import_command(
+        transcript,
+        {
+            "session_id": "session-1",
+            "provider": "openai",
+            "source": "hook:stop",
+            "after_message_count": 4,
+            "until_message_count": 6,
+        },
+    )
+
+    assert "--after-message-count" in cmd
+    assert cmd[cmd.index("--after-message-count") + 1] == "4"
+    assert "--until-message-count" in cmd
+    assert cmd[cmd.index("--until-message-count") + 1] == "6"

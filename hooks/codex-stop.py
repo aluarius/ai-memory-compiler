@@ -18,8 +18,9 @@ import sys
 import time
 from pathlib import Path
 
-# Recursion guard
-if os.environ.get("CLAUDE_INVOKED_BY"):
+# Recursion guard. ``MEMORY_COMPILER_INTERNAL`` is inherited by service-side
+# ``codex exec`` calls so their lifecycle hooks never import their own prompts.
+if os.environ.get("CLAUDE_INVOKED_BY") or os.environ.get("MEMORY_COMPILER_INTERNAL"):
     sys.exit(0)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +29,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from locking import file_lock
+from session_utils import codex_message_ranges
 
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 DEDUP_FILE = SCRIPTS_DIR / ".last-codex-import.json"
@@ -37,8 +39,18 @@ DEDUP_LOCK_FILE = SCRIPTS_DIR / ".locks" / "codex-stop.lock"
 # back to filesystem scanning.
 MAX_AGE = 120
 DEDUP_WINDOW = 3600
-MIN_SESSION_IMPORT_INTERVAL = 10 * 60
 MAX_RECENT_IMPORTS = 128
+CHECKPOINT_TTL_SECONDS = 7 * 24 * 60 * 60
+MAX_IMPORT_TURNS = 30
+MAX_IMPORT_CONTEXT_CHARS = 15_000
+
+
+class ImportReservation:
+    __slots__ = ("after_message_count", "until_message_count")
+
+    def __init__(self, *, after_message_count: int, until_message_count: int) -> None:
+        self.after_message_count = after_message_count
+        self.until_message_count = until_message_count
 
 
 def parse_hook_input(raw_input: str) -> dict:
@@ -53,23 +65,28 @@ def parse_hook_input(raw_input: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def load_recent_imports() -> list[dict]:
+def load_import_state() -> dict:
     if not DEDUP_FILE.exists():
-        return []
+        return {"recent": [], "session_checkpoints": {}}
     try:
         payload = json.loads(DEDUP_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return []
-
-    recent = payload.get("recent", [])
-    if not isinstance(recent, list):
-        return []
-    return [item for item in recent if isinstance(item, dict)]
+        return {"recent": [], "session_checkpoints": {}}
+    return payload if isinstance(payload, dict) else {"recent": [], "session_checkpoints": {}}
 
 
-def save_recent_imports(recent: list[dict]) -> None:
+def save_import_state(payload: dict) -> None:
     DEDUP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    DEDUP_FILE.write_text(json.dumps({"recent": recent}, indent=2), encoding="utf-8")
+    DEDUP_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _is_within_window(value: object, *, now: float, window: int) -> bool:
+    """Return whether an untrusted state timestamp is still within a time window."""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return False
+    return now - timestamp < window
 
 
 def find_latest_transcript() -> Path | None:
@@ -105,37 +122,96 @@ def build_import_key(
     return f"path:{transcript}:mtime:{transcript_mtime_ns}"
 
 
-def claim_import_key(import_key: str, *, session_id: str | None = None) -> bool:
-    """Atomically reserve an import key, returning False if it was already seen."""
+def reserve_import(
+    import_key: str,
+    *,
+    session_id: str | None,
+    message_count: int | None,
+) -> ImportReservation | None:
+    """Reserve a Stop import and return its exact unseen Codex message range."""
     now = time.time()
     with file_lock(DEDUP_LOCK_FILE):
+        payload = load_import_state()
         recent = [
             item
-            for item in load_recent_imports()
-            if now - float(item.get("timestamp", 0)) < DEDUP_WINDOW
+            for item in payload.get("recent", [])
+            if isinstance(item, dict)
+            if _is_within_window(item.get("timestamp"), now=now, window=DEDUP_WINDOW)
         ]
         if any(item.get("key") == import_key for item in recent):
-            return False
+            return None
 
-        if session_id:
-            latest_session_import = max(
-                (
-                    float(item.get("timestamp", 0))
-                    for item in recent
-                    if item.get("session_id") == session_id
-                ),
-                default=0,
-            )
-            if now - latest_session_import < MIN_SESSION_IMPORT_INTERVAL:
-                return False
+        after_message_count = 0
+        if session_id and message_count is not None:
+            checkpoints = payload.get("session_checkpoints", {})
+            if not isinstance(checkpoints, dict):
+                checkpoints = {}
+            checkpoints = {
+                key: value
+                for key, value in checkpoints.items()
+                if isinstance(value, dict)
+                and _is_within_window(
+                    value.get("timestamp"), now=now, window=CHECKPOINT_TTL_SECONDS
+                )
+            }
+            checkpoint = checkpoints.get(session_id, {})
+            try:
+                after_message_count = int(checkpoint.get("message_count", 0))
+            except (AttributeError, TypeError, ValueError):
+                after_message_count = 0
+            if message_count <= after_message_count:
+                return None
+            checkpoints[session_id] = {"message_count": message_count, "timestamp": now}
+            payload["session_checkpoints"] = checkpoints
 
         item = {"key": import_key, "timestamp": now}
         if session_id:
             item["session_id"] = session_id
 
         recent.append(item)
-        save_recent_imports(recent[-MAX_RECENT_IMPORTS:])
-        return True
+        payload["recent"] = recent[-MAX_RECENT_IMPORTS:]
+        save_import_state(payload)
+        return ImportReservation(
+            after_message_count=after_message_count,
+            until_message_count=message_count or 0,
+        )
+
+
+def release_import(
+    import_key: str,
+    *,
+    session_id: str | None,
+    reservation: ImportReservation,
+) -> None:
+    """Undo a reservation when the hook cannot launch its background importer."""
+    with file_lock(DEDUP_LOCK_FILE):
+        payload = load_import_state()
+        recent = payload.get("recent", [])
+        if isinstance(recent, list):
+            payload["recent"] = [
+                item
+                for item in recent
+                if not (isinstance(item, dict) and item.get("key") == import_key)
+            ]
+
+        if session_id and reservation.until_message_count:
+            checkpoints = payload.get("session_checkpoints", {})
+            if isinstance(checkpoints, dict):
+                checkpoint = checkpoints.get(session_id)
+                if isinstance(checkpoint, dict):
+                    try:
+                        checkpoint_count = int(checkpoint.get("message_count", 0))
+                    except (TypeError, ValueError):
+                        checkpoint_count = 0
+                    if checkpoint_count == reservation.until_message_count:
+                        checkpoint["message_count"] = reservation.after_message_count
+                        checkpoint["timestamp"] = time.time()
+        save_import_state(payload)
+
+
+def claim_import_key(import_key: str, *, session_id: str | None = None) -> bool:
+    """Atomically reserve an import key, returning False if it was already seen."""
+    return reserve_import(import_key, session_id=session_id, message_count=None) is not None
 
 
 def read_session_meta(transcript: Path) -> dict:
@@ -247,6 +323,10 @@ def build_import_command(transcript: Path, metadata: dict) -> list[str]:
         cmd.extend(["--cwd", cwd])
     if model:
         cmd.extend(["--model", model])
+    if "after_message_count" in metadata:
+        cmd.extend(["--after-message-count", str(metadata["after_message_count"])])
+    if "until_message_count" in metadata:
+        cmd.extend(["--until-message-count", str(metadata["until_message_count"])])
 
     return cmd
 
@@ -277,10 +357,46 @@ def main() -> None:
         transcript_mtime_ns=_transcript_mtime_ns(transcript),
     )
 
-    if not claim_import_key(import_key, session_id=meta.get("session_id") or None):
+    message_count: int | None = None
+    ranges: list[tuple[int, int]] = []
+    try:
+        message_count, _ = codex_message_ranges(
+            transcript,
+            max_turns=MAX_IMPORT_TURNS,
+            max_chars=MAX_IMPORT_CONTEXT_CHARS,
+        )
+        if not message_count:
+            message_count = None
+    except (OSError, UnicodeError):
+        # Keep the legacy one-shot import path available if a future Codex
+        # transcript format cannot be counted yet.
+        message_count = None
+
+    reservation = reserve_import(
+        import_key,
+        session_id=meta.get("session_id") or None,
+        message_count=message_count,
+    )
+    if reservation is None:
         return
 
-    cmd = build_import_command(transcript, meta)
+    if message_count is not None:
+        _, ranges = codex_message_ranges(
+            transcript,
+            after_message_count=reservation.after_message_count,
+            until_message_count=reservation.until_message_count,
+            max_turns=MAX_IMPORT_TURNS,
+            max_chars=MAX_IMPORT_CONTEXT_CHARS,
+        )
+        if not ranges:
+            release_import(
+                import_key,
+                session_id=meta.get("session_id") or None,
+                reservation=reservation,
+            )
+            return
+    else:
+        ranges = [(0, 0)]
 
     # Spawn as background process so hook returns quickly
     kwargs: dict = {}
@@ -290,14 +406,24 @@ def main() -> None:
         kwargs["start_new_session"] = True
 
     try:
-        subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **kwargs,
+        for after_message_count, until_message_count in ranges:
+            import_meta = meta.copy()
+            if message_count is not None:
+                import_meta["after_message_count"] = after_message_count
+                import_meta["until_message_count"] = until_message_count
+            cmd = build_import_command(transcript, import_meta)
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **kwargs,
+            )
+    except OSError:
+        release_import(
+            import_key,
+            session_id=meta.get("session_id") or None,
+            reservation=reservation,
         )
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":

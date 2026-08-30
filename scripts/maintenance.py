@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 
 WEEKLY_FULL_LINT_WEEKDAY = 6  # Sunday (Monday=0)
-STEP_TIMEOUT = 30 * 60  # generous: contradictions check reads the whole KB
+STEP_TIMEOUT = 30 * 60  # semantic lint may inspect multiple article files
 
 
 def run_step(name: str, cmd: list[str], timeout: int = STEP_TIMEOUT) -> int:

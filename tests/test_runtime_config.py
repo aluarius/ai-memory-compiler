@@ -57,7 +57,7 @@ def test_build_codex_command_uses_expected_mode() -> None:
     assert "--sandbox" in cmd
     assert "workspace-write" in cmd
     assert "-m" in cmd
-    assert cmd[-1] == "Hello"
+    assert cmd[-1] == "-"
 
 
 def test_get_claude_model_default_and_override(monkeypatch, tmp_path: Path) -> None:

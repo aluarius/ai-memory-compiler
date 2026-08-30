@@ -1,8 +1,50 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import nullcontext
 from pathlib import Path
 
 import lint
+
+
+def test_contradiction_check_uses_bounded_full_text_candidates(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Semantic lint receives only bounded, full-text candidate pairs."""
+    knowledge_dir = tmp_path / "knowledge"
+    concepts_dir = knowledge_dir / "concepts"
+    concepts_dir.mkdir(parents=True)
+    (concepts_dir / "alpha.md").write_text("Alpha source body", encoding="utf-8")
+    (concepts_dir / "beta.md").write_text("Beta source body", encoding="utf-8")
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(lint, "KNOWLEDGE_DIR", knowledge_dir)
+    monkeypatch.setattr(
+        lint.kb_db,
+        "find_similar_pairs",
+        lambda limit: [{"a": "concepts/alpha", "b": "concepts/beta", "score": 1.0}],
+    )
+    monkeypatch.setattr(lint, "get_task_runtime", lambda _: "codex")
+    monkeypatch.setattr(lint, "get_codex_model", lambda: None)
+    monkeypatch.setattr(lint, "file_lock", lambda _: nullcontext())
+
+    def fake_run(prompt: str, **kwargs: object) -> str:
+        observed["prompt"] = prompt
+        observed["kwargs"] = kwargs
+        return "NO_ISSUES"
+
+    monkeypatch.setattr(lint, "run_codex_prompt", fake_run)
+
+    assert asyncio.run(lint.check_contradictions()) == []
+    prompt = str(observed["prompt"])
+    assert "Alpha source body" in prompt
+    assert "Beta source body" in prompt
+    assert "Candidate Article Pairs" in prompt
+    assert observed["kwargs"] == {
+        "cwd": lint.ROOT_DIR,
+        "allow_edits": False,
+        "model": None,
+    }
 
 
 def test_check_weak_connectivity_reports_low_degree_articles(monkeypatch, tmp_path: Path) -> None:

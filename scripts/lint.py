@@ -15,8 +15,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
+import sys
 from pathlib import Path
 
+import kb_db
 from codex_exec import run_codex_prompt
 from config import KNOWLEDGE_DIR, LLM_LOCK_FILE, REPORTS_DIR, now_iso, today_iso
 from locking import file_lock
@@ -33,12 +35,13 @@ from utils import (
     list_raw_files,
     list_wiki_articles,
     load_state,
-    read_all_wiki_content,
     update_state,
     wiki_article_exists,
 )
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+MAX_SEMANTIC_LINT_CANDIDATES = 12
+MAX_SEMANTIC_LINT_PROMPT_CHARS = 750_000
 
 
 def check_broken_links() -> list[dict]:
@@ -270,7 +273,7 @@ def fix_index_source_sprawl(issues: list[dict]) -> int:
 
     text = index_path.read_text(encoding="utf-8")
     fixed = 0
-    for target, cell in cells_by_target.items():
+    for cell in cells_by_target.values():
         parts = [p.strip() for p in cell.split(",") if p.strip()]
         if len(parts) <= MAX_INDEX_SOURCES:
             continue
@@ -346,31 +349,85 @@ def check_weak_connectivity(
     return issues
 
 
-async def check_contradictions() -> list[dict]:
-    """Use LLM to detect contradictions across articles."""
-    wiki_content = read_all_wiki_content()
+def _semantic_candidate_blocks() -> list[str] | None:
+    """Return bounded full-text pairs most likely to expose semantic conflicts.
 
-    prompt = f"""Review this knowledge base for contradictions, inconsistencies, or
-conflicting claims across articles.
+    Mutual FTS neighbours are the strongest local signal that two articles make
+    comparable claims. The SQLite index is derived data; ``None`` means it is
+    unavailable and must be rebuilt rather than silently weakening this check.
+    """
+    pairs = kb_db.find_similar_pairs(limit=MAX_SEMANTIC_LINT_CANDIDATES)
+    if pairs is None:
+        return None
 
-## Knowledge Base
+    blocks: list[str] = []
+    size = 0
+    for pair in pairs:
+        a = pair.get("a")
+        b = pair.get("b")
+        if not isinstance(a, str) or not isinstance(b, str):
+            continue
+        try:
+            a_body = (KNOWLEDGE_DIR / f"{a}.md").read_text(encoding="utf-8")
+            b_body = (KNOWLEDGE_DIR / f"{b}.md").read_text(encoding="utf-8")
+        except OSError:
+            continue
 
-{wiki_content}
+        block = (
+            f"### {a} vs {b} (similarity score {pair.get('score', 'unknown')})\n\n"
+            f"#### {a}\n\n{a_body}\n\n#### {b}\n\n{b_body}"
+        )
+        if size + len(block) > MAX_SEMANTIC_LINT_PROMPT_CHARS:
+            continue
+        blocks.append(block)
+        size += len(block)
+    return blocks
 
-## Instructions
+
+def build_contradiction_prompt(candidate_blocks: list[str]) -> str:
+    """Build a bounded semantic-lint prompt from verified full-text candidates."""
+    pairs = "\n\n---\n\n".join(candidate_blocks)
+    return f"""Review this knowledge base for real contradictions, inconsistencies, or
+conflicting claims across articles. This is a read-only review: do not edit any files.
+
+## Candidate Article Pairs
+
+{pairs}
+
+The pairs are mutual full-text-search neighbours, selected because they cover
+similar subjects. Their full source text is included above. Do not infer a conflict
+from titles, summaries, or omitted articles.
 
 Look for:
 - Direct contradictions (article A says X, article B says not-X)
-- Inconsistent recommendations (different articles recommend conflicting approaches)
-- Outdated information that conflicts with newer entries
+- Inconsistent recommendations for the same scope and conditions
+- Outdated information that conflicts with a newer entry on the same subject
 
-For each issue found, output EXACTLY one line in this format:
+Do not flag differences in date, project, environment, or stated assumptions when
+they can both be true. Prefer no finding when the evidence is ambiguous.
+
+For each verified issue found, output EXACTLY one line in this format:
 CONTRADICTION: [file1] vs [file2] - description of the conflict
 INCONSISTENCY: [file] - description of the inconsistency
 
-If no issues found, output exactly: NO_ISSUES
+If no verified issues are found, output exactly: NO_ISSUES
 
 Do NOT output anything else - no preamble, no explanation, just the formatted lines."""
+
+
+async def check_contradictions() -> list[dict]:
+    """Use an LLM to verify bounded full-text candidates for contradictions."""
+    candidate_blocks = _semantic_candidate_blocks()
+    if candidate_blocks is None:
+        return [{
+            "severity": "error",
+            "check": "contradiction",
+            "file": "(system)",
+            "detail": "Semantic check unavailable: rebuild scripts/kb-index.sqlite first.",
+        }]
+    if not candidate_blocks:
+        return []
+    prompt = build_contradiction_prompt(candidate_blocks)
 
     response = ""
     runtime = get_task_runtime("lint")
@@ -407,14 +464,14 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
                         for block in message.content:
                             if isinstance(block, TextBlock):
                                 response += block.text
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - the external LLM boundary must never abort lint.
         return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": f"LLM check failed: {e}"}]
 
     issues = []
     if "NO_ISSUES" not in response:
         for line in response.strip().split("\n"):
             line = line.strip()
-            if line.startswith("CONTRADICTION:") or line.startswith("INCONSISTENCY:"):
+            if line.startswith(("CONTRADICTION:", "INCONSISTENCY:")):
                 issues.append({
                     "severity": "warning",
                     "check": "contradiction",
@@ -730,4 +787,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

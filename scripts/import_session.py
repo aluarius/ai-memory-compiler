@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -37,6 +37,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=None, help="Optional model identifier")
     parser.add_argument("--cwd", default=None, help="Working directory where the session happened")
     parser.add_argument("--source", default="import", help="Short source label for runtime metadata")
+    parser.add_argument(
+        "--after-message-count",
+        type=int,
+        default=0,
+        help="For Codex JSONL, import messages after this checkpoint count",
+    )
+    parser.add_argument(
+        "--until-message-count",
+        type=int,
+        default=None,
+        help="For Codex JSONL, stop at this checkpoint count",
+    )
     return parser.parse_args()
 
 
@@ -51,6 +63,8 @@ def main() -> int:
         transcript,
         max_turns=MAX_TURNS,
         max_chars=MAX_CONTEXT_CHARS,
+        after_message_count=max(args.after_message_count, 0),
+        until_message_count=args.until_message_count,
     )
     context = parsed.context.strip()
     if not context:
@@ -58,9 +72,10 @@ def main() -> int:
         return 1
 
     context = sanitize(context)
-    timestamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
     session_id = args.session_id or parsed.session_id or transcript.stem
-    temp_context = SCRIPTS_DIR / f"import-flush-{session_id}-{timestamp}.md"
+    range_suffix = f"-{args.after_message_count}-{args.until_message_count or 'latest'}"
+    temp_context = SCRIPTS_DIR / f"import-flush-{session_id}{range_suffix}-{timestamp}.md"
     temp_context.write_text(context, encoding="utf-8")
 
     provider = args.provider or parsed.provider or "openai"

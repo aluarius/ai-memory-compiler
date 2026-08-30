@@ -21,7 +21,7 @@ from pathlib import Path
 
 # Recursion guard: if we were spawned by flush.py (which calls Agent SDK,
 # which runs Claude Code, which would fire this hook again), exit immediately.
-if os.environ.get("CLAUDE_INVOKED_BY"):
+if os.environ.get("CLAUDE_INVOKED_BY") or os.environ.get("MEMORY_COMPILER_INTERNAL"):
     sys.exit(0)
 
 ROOT = Path(__file__).resolve().parent.parent

@@ -30,6 +30,8 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>MEMORY_CODEX_BIN</key>
+        <string>/Users/exmac/.nvm/versions/node/v25.2.1/bin/codex</string>
     </dict>
 </dict>
 </plist>

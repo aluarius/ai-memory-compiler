@@ -23,6 +23,7 @@ Configure in .claude/settings.json:
 """
 
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,6 +51,11 @@ MAX_HUB_ROWS = 15
 _ROW_RE = re.compile(
     r"^\|\s*(\[\[[^\]]+\]\])\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*\|\s*$"
 )
+
+
+def is_internal_invocation() -> bool:
+    """Return whether a service-side Codex/Claude call triggered this hook."""
+    return bool(os.environ.get("CLAUDE_INVOKED_BY") or os.environ.get("MEMORY_COMPILER_INTERNAL"))
 
 
 def get_recent_log() -> str:
@@ -225,6 +231,8 @@ def build_context() -> str:
 
 
 def main():
+    if is_internal_invocation():
+        return
     context = build_context()
 
     output = {

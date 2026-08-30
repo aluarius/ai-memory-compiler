@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,21 @@ def test_parse_index_rows_extracts_all_data_rows():
     assert rows[0]["link"] == "[[concepts/fresh-topic]]"
     assert rows[0]["updated"] == "2026-06-09"
     assert rows[2]["source_count"] == 4
+
+
+def test_internal_invocation_skips_context_injection(monkeypatch) -> None:
+    mod = load_session_start_module()
+    monkeypatch.setenv("MEMORY_COMPILER_INTERNAL", "1")
+
+    assert mod.is_internal_invocation() is True
+
+    monkeypatch.delenv("MEMORY_COMPILER_INTERNAL")
+    previous = os.environ.pop("CLAUDE_INVOKED_BY", None)
+    try:
+        assert mod.is_internal_invocation() is False
+    finally:
+        if previous is not None:
+            os.environ["CLAUDE_INVOKED_BY"] = previous
 
 
 def test_parse_index_rows_skips_header_and_prose():

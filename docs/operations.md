@@ -18,6 +18,11 @@ Use `health.py` for quick operational triage. Use `lint.py` when you need a
 persisted markdown report in `reports/lint-YYYY-MM-DD.md` or the optional LLM
 contradiction check.
 
+The semantic check selects up to 12 mutual full-text-search neighbours and
+sends their complete article pairs to the read-only LLM. This bounds request
+size and run time while requiring source-text verification before it reports
+an issue.
+
 It reports:
 
 - article and daily-log counts;

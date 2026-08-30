@@ -115,7 +115,7 @@ for repo-local hooks, but this project's recommended setup is the global file:
       {
         "hooks": [{
           "type": "command",
-          "command": "cd /path/to/ai-memory-compiler && uv run python hooks/codex-stop.py",
+          "command": "cd /path/to/ai-memory-compiler && MEMORY_CODEX_BIN=/absolute/path/to/codex uv run python hooks/codex-stop.py",
           "timeout": 10
         }]
       }
@@ -126,8 +126,12 @@ for repo-local hooks, but this project's recommended setup is the global file:
 
 - **SessionStart** — same knowledge base injection as Claude Code
 - **Stop** — turn-scoped auto-import using Codex's official `transcript_path`
-  hook payload; rate-limited per session to avoid repetitive rolling summaries,
-  and falls back to transcript scanning only for older builds
+  hook payload; it persists a per-session message checkpoint and imports only
+  the unseen range (splitting large deltas without gaps), with a legacy
+  transcript-scan fallback for older builds
+- If Codex is installed through NVM or another shell-only manager, set
+  `MEMORY_CODEX_BIN` in the Stop command so every flush and compile child uses
+  the real binary rather than a GUI or terminal wrapper
 - Codex does not currently provide a true session-end hook equivalent to
   Claude Code's `SessionEnd`
 - If you define the same hook in both `~/.codex/hooks.json` and
@@ -215,6 +219,11 @@ cp docs/launchd-maintenance.plist ~/Library/LaunchAgents/com.aluarius.memory-com
 # edit the repo path inside if yours differs, then:
 launchctl load ~/Library/LaunchAgents/com.aluarius.memory-compiler-maintenance.plist
 ```
+
+When Codex is installed through NVM, also set `MEMORY_CODEX_BIN` in that
+plist to its absolute executable path (for example,
+`/Users/you/.nvm/versions/node/vX.Y.Z/bin/codex`). launchd does not source
+the interactive shell configuration that puts NVM on `PATH`.
 
 ## What's Different from Upstream
 

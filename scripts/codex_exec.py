@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -15,9 +16,10 @@ def build_codex_command(
     output_file: Path,
     prompt: str,
     model: str | None = None,
+    executable: str = "codex",
 ) -> list[str]:
     cmd = [
-        "codex",
+        executable,
         "exec",
         "-C",
         str(cwd),
@@ -37,8 +39,23 @@ def build_codex_command(
     if model:
         cmd.extend(["-m", model])
 
-    cmd.append(prompt)
+    cmd.append("-")
     return cmd
+
+
+def resolve_codex_executable() -> str:
+    """Find Codex in an interactive shell or an explicitly configured service env."""
+    configured = os.environ.get("MEMORY_CODEX_BIN")
+    if configured:
+        executable = Path(configured).expanduser()
+        if executable.is_file() and os.access(executable, os.X_OK):
+            return str(executable)
+        raise RuntimeError(f"Configured Codex executable is not runnable: {executable}")
+
+    executable = shutil.which("codex")
+    if executable is None:
+        raise RuntimeError("Codex CLI not found in PATH; set MEMORY_CODEX_BIN for services")
+    return executable
 
 
 def run_codex_prompt(
@@ -48,8 +65,7 @@ def run_codex_prompt(
     allow_edits: bool,
     model: str | None = None,
 ) -> str:
-    if shutil.which("codex") is None:
-        raise RuntimeError("Codex CLI not found in PATH")
+    executable = resolve_codex_executable()
 
     with tempfile.NamedTemporaryFile(prefix="codex-last-message-", suffix=".txt", delete=False) as tmp:
         output_path = Path(tmp.name)
@@ -62,15 +78,21 @@ def run_codex_prompt(
         output_file=output_path,
         prompt=prompt,
         model=model,
+        executable=executable,
     )
 
     try:
         with stderr_path.open("w", encoding="utf-8") as stderr_handle:
+            child_env = os.environ.copy()
+            child_env["MEMORY_COMPILER_INTERNAL"] = "1"
             completed = subprocess.run(
                 cmd,
                 cwd=str(cwd),
+                input=prompt,
+                text=True,
                 stdout=subprocess.DEVNULL,
                 stderr=stderr_handle,
+                env=child_env,
                 check=False,
             )
         if completed.returncode != 0:
