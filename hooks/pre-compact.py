@@ -105,11 +105,7 @@ def main() -> None:
     flush_script = SCRIPTS_DIR / "flush.py"
 
     cmd = [
-        "uv",
-        "run",
-        "--directory",
-        str(ROOT),
-        "python",
+        sys.executable,
         str(flush_script),
         str(context_file),
         session_id,

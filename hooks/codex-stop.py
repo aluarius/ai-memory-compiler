@@ -203,7 +203,7 @@ def release_import(
                         checkpoint_count = int(checkpoint.get("message_count", 0))
                     except (TypeError, ValueError):
                         checkpoint_count = 0
-                    if checkpoint_count == reservation.until_message_count:
+                    if checkpoint_count >= reservation.until_message_count:
                         checkpoint["message_count"] = reservation.after_message_count
                         checkpoint["timestamp"] = time.time()
         save_import_state(payload)
@@ -298,11 +298,7 @@ def should_skip_stop_event(hook_input: dict) -> bool:
 
 def build_import_command(transcript: Path, metadata: dict) -> list[str]:
     cmd = [
-        "uv",
-        "run",
-        "--directory",
-        str(ROOT),
-        "python",
+        sys.executable,
         str(SCRIPTS_DIR / "import_session.py"),
         str(transcript),
         "--agent",

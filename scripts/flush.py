@@ -147,16 +147,19 @@ def preserve_failed_context(context_file: Path) -> Path | None:
 
     Long-lived sessions re-import every turn; if their flushes keep failing,
     each failure used to add another timestamped copy (observed: 5 copies of
-    one session within an hour). Keep only the newest context per session —
-    it supersedes the older snapshots of the same transcript.
+    one session within an hour). Keep only the newest context per recovery
+    identity — it supersedes an older snapshot of the same transcript. A
+    range import has its own identity so disjoint transcript chunks survive
+    independently.
     """
     try:
         FAILED_FLUSH_DIR.mkdir(parents=True, exist_ok=True)
 
         session_id = extract_session_id(context_file.name)
         if session_id:
-            for stale in FAILED_FLUSH_DIR.glob(f"*{session_id}*.md"):
-                stale.unlink(missing_ok=True)
+            for stale in FAILED_FLUSH_DIR.glob("*.md"):
+                if extract_session_id(stale.name) == session_id:
+                    stale.unlink(missing_ok=True)
 
         destination = FAILED_FLUSH_DIR / context_file.name
         if destination.exists():
@@ -438,7 +441,7 @@ def maybe_trigger_compilation(now: datetime | None = None) -> None:
     else:
         logging.info("End-of-day compilation triggered (after %d:00)", COMPILE_AFTER_HOUR)
 
-    cmd = ["uv", "run", "--directory", str(ROOT), "python", str(compile_script)]
+    cmd = [sys.executable, str(compile_script)]
     if skip_today:
         cmd.append("--skip-today")
 
@@ -488,15 +491,31 @@ PERMANENT_FAILED_DIR = FAILED_FLUSH_DIR / "permanent"
 RETRY_STATE_FILE = FAILED_FLUSH_DIR / "retry-state.json"
 
 _SESSION_ID_RE = None  # compiled lazily; see extract_session_id
+_IMPORT_RANGE_RE = None
 
 
 def extract_session_id(filename: str) -> str | None:
-    """Pull the session UUID out of a failed-context filename.
+    """Return the recovery identity encoded in a failed-context filename.
 
     Filenames look like session-flush-<uuid>-<ts>.md, flush-context-<uuid>.md,
-    import-flush-<uuid>-<ts>-<ts2>.md — the one stable token is the UUID.
+    import-flush-<uuid>-<ts>-<ts2>.md. Range imports add
+    ``-<after>-<until>-`` and need an independent identity because their
+    contexts are disjoint rather than successively superseding snapshots.
     """
-    global _SESSION_ID_RE
+    global _IMPORT_RANGE_RE, _SESSION_ID_RE
+    if _IMPORT_RANGE_RE is None:
+        import re
+
+        _IMPORT_RANGE_RE = re.compile(
+            r"^import-flush-(?P<session>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12})-(?P<after>\d+)-(?P<until>\d+|latest)-"
+        )
+    range_match = _IMPORT_RANGE_RE.match(filename)
+    if range_match:
+        return (
+            f"{range_match.group('session')}:"
+            f"{range_match.group('after')}-{range_match.group('until')}"
+        )
     if _SESSION_ID_RE is None:
         import re
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 
@@ -160,6 +161,28 @@ def test_release_import_restores_the_checkpoint_after_spawn_failure(
     assert retry.until_message_count == 4
 
 
+def test_release_import_rewinds_a_later_reservation_to_avoid_losing_the_earlier_range(
+    tmp_path: Path, monkeypatch
+) -> None:
+    codex_stop = load_codex_stop_module()
+    codex_stop.DEDUP_FILE = tmp_path / ".last-codex-import.json"
+    codex_stop.DEDUP_LOCK_FILE = tmp_path / ".locks" / "codex-stop.lock"
+    monkeypatch.setattr(codex_stop.time, "time", lambda: 1_000)
+
+    first = codex_stop.reserve_import("session:a:turn:1", session_id="a", message_count=4)
+    second = codex_stop.reserve_import("session:a:turn:2", session_id="a", message_count=6)
+
+    assert first is not None
+    assert second is not None
+
+    codex_stop.release_import("session:a:turn:1", session_id="a", reservation=first)
+    retry = codex_stop.reserve_import("session:a:turn:3", session_id="a", message_count=6)
+
+    assert retry is not None
+    assert retry.after_message_count == 0
+    assert retry.until_message_count == 6
+
+
 def test_build_import_command_forwards_the_reserved_message_range(tmp_path: Path) -> None:
     codex_stop = load_codex_stop_module()
     transcript = tmp_path / "rollout-test.jsonl"
@@ -179,3 +202,11 @@ def test_build_import_command_forwards_the_reserved_message_range(tmp_path: Path
     assert cmd[cmd.index("--after-message-count") + 1] == "4"
     assert "--until-message-count" in cmd
     assert cmd[cmd.index("--until-message-count") + 1] == "6"
+
+
+def test_build_import_command_uses_the_hook_interpreter(tmp_path: Path) -> None:
+    codex_stop = load_codex_stop_module()
+
+    cmd = codex_stop.build_import_command(tmp_path / "rollout-test.jsonl", {})
+
+    assert cmd[0] == sys.executable

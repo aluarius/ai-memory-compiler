@@ -86,9 +86,10 @@ Anything left over needs a human or the next compile pass.
 ## Failed-Flush Lifecycle
 
 When a flush fails (SDK outage, locked keychain under launchd, etc.), its
-context is preserved in `reports/failed-flushes/` — one file per session; a
-newer failure replaces older snapshots of the same session. Recovery is
-layered:
+context is preserved in `reports/failed-flushes/` — a newer failure replaces
+an older snapshot of the same session. Codex range imports use one recovery
+identity per disjoint range, so a failure in a later range never replaces an
+earlier range. Recovery is layered:
 
 1. **In-process retries** — every flush attempts up to 4 times with
    3s/30s/180s backoff before preserving the context.

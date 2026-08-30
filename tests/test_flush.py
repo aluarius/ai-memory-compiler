@@ -136,6 +136,21 @@ def test_extract_session_id_handles_all_prefixes() -> None:
     assert flush.extract_session_id("garbage-name.md") is None
 
 
+def test_extract_session_id_keeps_import_ranges_as_distinct_recovery_units() -> None:
+    assert (
+        flush.extract_session_id(
+            f"import-flush-{UUID_A}-0-30-20260606-004107.md"
+        )
+        == f"{UUID_A}:0-30"
+    )
+    assert (
+        flush.extract_session_id(
+            f"import-flush-{UUID_A}-30-60-20260606-004108.md"
+        )
+        == f"{UUID_A}:30-60"
+    )
+
+
 def _setup_failed_dir(tmp_path, monkeypatch):
     failed_dir = tmp_path / "failed-flushes"
     failed_dir.mkdir()
@@ -264,6 +279,26 @@ def test_preserve_failed_context_replaces_older_copies_of_same_session(
     remaining = list(failed_dir.glob("*.md"))
     assert len(remaining) == 1
     assert remaining[0].read_text(encoding="utf-8") == "newest snapshot"
+
+
+def test_preserve_failed_context_keeps_disjoint_import_ranges(tmp_path, monkeypatch) -> None:
+    failed_dir = tmp_path / "failed"
+    failed_dir.mkdir()
+    monkeypatch.setattr(flush, "FAILED_FLUSH_DIR", failed_dir)
+
+    first_range = failed_dir / f"import-flush-{UUID_A}-0-30-20260606-004107.md"
+    first_range.write_text("first range", encoding="utf-8")
+    second_range = tmp_path / f"import-flush-{UUID_A}-30-60-20260606-004108.md"
+    second_range.write_text("second range", encoding="utf-8")
+
+    preserved = flush.preserve_failed_context(second_range)
+
+    assert preserved is not None
+    assert first_range.exists()
+    assert sorted(path.read_text(encoding="utf-8") for path in failed_dir.glob("*.md")) == [
+        "first range",
+        "second range",
+    ]
 
 
 def test_retry_failed_respects_limit(tmp_path, monkeypatch) -> None:

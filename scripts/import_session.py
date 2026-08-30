@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 HOOKS_DIR = ROOT_DIR / "hooks"
 SCRIPTS_DIR = ROOT_DIR / "scripts"
+FAILED_FLUSH_DIR = ROOT_DIR / "reports" / "failed-flushes"
 
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -26,6 +27,22 @@ from session_utils import parse_transcript
 
 MAX_TURNS = 30
 MAX_CONTEXT_CHARS = 15_000
+
+
+def preserve_failed_context(context_file: Path) -> None:
+    """Move a context into the normal retry queue when flush.py cannot launch."""
+    try:
+        FAILED_FLUSH_DIR.mkdir(parents=True, exist_ok=True)
+        destination = FAILED_FLUSH_DIR / context_file.name
+        if destination.exists():
+            timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
+            destination = FAILED_FLUSH_DIR / (
+                f"{context_file.stem}-{timestamp}{context_file.suffix}"
+            )
+        context_file.replace(destination)
+    except OSError:
+        # The caller preserves the nonzero exit so the failed import remains visible.
+        pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,11 +103,7 @@ def main() -> int:
         source = f"import:{parsed.source}"
 
     cmd = [
-        "uv",
-        "run",
-        "--directory",
-        str(ROOT_DIR),
-        "python",
+        sys.executable,
         str(SCRIPTS_DIR / "flush.py"),
         str(temp_context),
         session_id,
@@ -108,6 +121,8 @@ def main() -> int:
         cmd.extend(["--cwd", cwd])
 
     completed = subprocess.run(cmd, cwd=str(ROOT_DIR), check=False)
+    if completed.returncode != 0:
+        preserve_failed_context(temp_context)
     return completed.returncode
 
 
