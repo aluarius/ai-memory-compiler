@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from memory_store import MemoryStore, StoreConflict, content_hash, timestamp
 from session_utils import _codex_message_from_entry, _normalize_claude_content
@@ -16,6 +17,39 @@ if str(HOOKS_DIR) not in sys.path:
 from sanitize import sanitize  # noqa: E402 - shared hook module is loaded after path setup.
 
 MAX_JOB_CHARS = 16_000
+PROVENANCE_KEYS = (
+    "agent", "provider", "session_id", "transcript_path", "cwd", "model",
+    "after_message_count", "until_message_count",
+)
+
+
+def sanitize_metadata(values: dict[str, Any]) -> dict[str, Any]:
+    """Persist only redacted provenance scalars, never arbitrary hook payloads."""
+    allowed = {*PROVENANCE_KEYS, "captured_at", "source", "turn_id", "event_date"}
+    return {
+        key: sanitize(value) if isinstance(value, str) else value
+        for key, value in values.items()
+        if key in allowed and isinstance(value, (str, int, float, bool))
+    }
+
+
+def _raw_capture_metadata(path: Path, overrides: dict, parsed: dict) -> dict:
+    meta = {**{k: v for k, v in parsed.items() if v}, **{k: v for k, v in overrides.items() if v}}
+    meta.setdefault("session_id", path.stem)
+    meta.setdefault("agent", "claude_code")
+    meta.setdefault("captured_at", timestamp())
+    meta["transcript_path"] = str(path.resolve())
+    return meta
+
+
+def _legacy_capture_key(meta: dict) -> str:
+    return f"{meta['agent']}:{meta['session_id']}:{meta['transcript_path']}"
+
+
+def capture_metadata(path: Path, overrides: dict, parsed: dict) -> dict:
+    """Share sanitized import scope without merging identities that redact alike."""
+    raw = _raw_capture_metadata(path, overrides, parsed)
+    return {**sanitize_metadata(raw), "capture_identity": content_hash(_legacy_capture_key(raw))}
 
 
 def read_messages(path: Path) -> tuple[list[str], dict]:
@@ -84,23 +118,28 @@ def capture_transcript(store: MemoryStore, path: Path, metadata: dict, *,
     Transcript rewrites fail closed; historical checkpoint prefixes cannot drift.
     """
     messages, parsed = read_messages(path)
-    meta = {**{k: v for k, v in parsed.items() if v}, **{k: v for k, v in metadata.items() if v}}
-    meta.setdefault("session_id", path.stem)
-    meta.setdefault("agent", "claude_code")
-    meta.setdefault("captured_at", timestamp())
-    meta["transcript_path"] = str(path.resolve())
-    key = f"{meta['agent']}:{meta['session_id']}:{path.resolve()}"
+    raw_meta = _raw_capture_metadata(path, metadata, parsed)
+    meta = capture_metadata(path, metadata, parsed)
+    legacy_key = _legacy_capture_key(raw_meta)
+    key = meta["capture_identity"]
     explicit = after_message_count is not None or until_message_count is not None
     for _ in range(4):
-        previous = None if explicit else store.get_state("capture_checkpoints", {}).get(key)
+        checkpoints = store.get_state("capture_checkpoints", {}) if not explicit else {}
+        previous = checkpoints.get(key, checkpoints.get(legacy_key))
         start = max(after_message_count or 0, 0) if explicit else (previous or {}).get("message_count", 0)
         end = min(until_message_count, len(messages)) if until_message_count is not None else len(messages)
         if previous and (start > len(messages) or content_hash("".join(messages[:start])) != previous["prefix_hash"]):
             raise StoreConflict("Captured transcript prefix changed; retained jobs were not overwritten")
         if start >= end:
+            if not explicit and legacy_key in checkpoints:
+                try:
+                    store.capture_batch(key, expected=previous, checkpoint=previous,
+                                        captures=[], legacy_key=legacy_key)
+                except StoreConflict:
+                    continue
             return []
         captures = []
-        covered, reserved = legacy_coverage(store, messages, meta) if previous is None and not explicit else (set(), 0)
+        covered, reserved = legacy_coverage(store, messages, raw_meta) if previous is None and not explicit else (set(), 0)
         ranges = []
         position = start
         while position < end:
@@ -121,12 +160,14 @@ def capture_transcript(store: MemoryStore, path: Path, metadata: dict, *,
                                  "part_offset": offset, "part_total_chars": len(context),
                                  "legacy_unverified": beginning < reserved}
                     captures.append({"context": part, "metadata": part_meta,
-                                     "identity": f"{key}:{beginning}:{ending}:{offset}"})
+                                     # _enqueue hashes this identity; retain old dedup keys.
+                                     "identity": f"{legacy_key}:{beginning}:{ending}:{offset}"})
         checkpoint = {"message_count": end, "prefix_hash": content_hash("".join(messages[:end])),
                       "captured_at": meta["captured_at"]}
         try:
             return store.capture_batch(None if explicit else key, expected=previous,
-                                       checkpoint=checkpoint, captures=captures)
+                                       checkpoint=checkpoint, captures=captures,
+                                       legacy_key=None if explicit else legacy_key)
         except StoreConflict:
             continue
     raise StoreConflict("Concurrent capture did not settle; transcript remains available for retry")

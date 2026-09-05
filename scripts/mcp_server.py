@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from article_schema import StoreValidationError
 import kb_db
 from locking import file_lock
 from utils import safe_join
@@ -174,13 +174,13 @@ def read_article(path: str) -> str:
     if not path.endswith(".md"):
         path += ".md"
 
-    article = safe_join(KNOWLEDGE_DIR, path)
-    if article is None:
-        return f"Invalid article path: {path}"
-
     store = kb_db.canonical_store(ROOT_DIR)
     if store is not None:
-        record = store.read_article(path.removesuffix(".md"))
+        # Canonical identities use lexical validation, independent of exports.
+        try:
+            record = store.read_article(path)
+        except StoreValidationError:
+            return f"Invalid article path: {path}"
         if record is None:
             slug = Path(path).stem
             candidates = [a for a in store.list_articles() if slug in Path(a["path"]).name]
@@ -189,6 +189,10 @@ def read_article(path: str) -> str:
             record = candidates[0]
         _record_article_read(record["path"])
         return record["body"]
+
+    article = safe_join(KNOWLEDGE_DIR, path)
+    if article is None:
+        return f"Invalid article path: {path}"
 
     if not article.exists():
         # Try fuzzy match

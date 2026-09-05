@@ -43,7 +43,13 @@ is a failure; exactly `FLUSH_OK` is an explicit no-memory result.
 Durable jobs survive a failed spawn or interrupted worker. Retry cooldowns and
 leases prevent immediate repeat calls. Provider, authentication and environment
 failures retain context and do not automatically quarantine it. Repeated invalid
-model output can require manual review. See [operations](docs/operations.md).
+model output can require manual review; only invalid responses count toward that
+threshold, not provider failures. See [operations](docs/operations.md).
+
+Capture stores redacted scalar provenance and an opaque transcript identity.
+The original identity still distinguishes sessions whose secrets redact to the
+same text. Existing plaintext checkpoint keys move to hashed keys atomically
+when their transcript is next captured, without replaying captured history.
 
 ## Model change-set contract
 
@@ -89,6 +95,9 @@ The reason must be nonempty. Unknown fields, duplicate JSON keys, malformed
 frontmatter, invalid dates, unknown sources and broken links are rejected.
 Summaries are nonempty, one line, at most 200 characters, and contain neither
 pipes nor wikilinks. `projects` is optional; keep known project scope intact.
+Omitted projects inherit the original scope for full replacements as well as
+exact edits. Model changes must preserve all prior sources. Each article changed
+by compilation must also cite the daily source currently being processed.
 Never mix `body` and `edits` for one article. Patch targets must already exist in
 the original snapshot. Unchanged inherited legacy summaries remain untouched;
 new or explicitly changed summaries must satisfy the concise-summary contract.

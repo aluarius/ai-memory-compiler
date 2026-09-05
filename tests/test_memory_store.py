@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, contextmanager
 import sqlite3
 from pathlib import Path
 
@@ -92,6 +94,82 @@ def test_backup_is_self_contained_and_readonly_after_relocation(store, tmp_path)
     assert relocated.read_bytes()[18:20] == b"\x01\x01"
     with sqlite3.connect(relocated.as_uri() + "?mode=ro", uri=True) as connection:
         assert connection.execute("SELECT count(*) FROM articles").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("occupied", ["file", "directory", "dangling-symlink"])
+def test_backup_preserves_an_occupied_destination(
+    store: MemoryStore, tmp_path: Path, occupied: str,
+) -> None:
+    destination = tmp_path / "backup.sqlite"
+    missing_target = tmp_path / "missing.sqlite"
+    if occupied == "file":
+        destination.write_bytes(b"Existing backup")
+    elif occupied == "directory":
+        destination.mkdir()
+    else:
+        destination.symlink_to(missing_target)
+
+    with pytest.raises(FileExistsError):
+        store.backup(destination)
+
+    if occupied == "file":
+        assert destination.read_bytes() == b"Existing backup"
+    elif occupied == "directory":
+        assert destination.is_dir()
+    else:
+        assert destination.is_symlink()
+        assert not missing_target.exists()
+
+
+def test_backup_preserves_destination_created_during_snapshot(
+    store: MemoryStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup_directory = tmp_path / "backups"
+    backup_directory.mkdir()
+    destination = backup_directory / "snapshot.sqlite"
+    original_connect = store.connect
+    competing_bytes = None
+
+    @contextmanager
+    def create_competing_backup(readonly: bool = False) -> Iterator[sqlite3.Connection]:
+        nonlocal competing_bytes
+        with closing(sqlite3.connect(destination)) as competing, competing:
+            competing.execute("CREATE TABLE older_snapshot(value TEXT)")
+            competing.execute("INSERT INTO older_snapshot VALUES ('Retain this backup')")
+        competing_bytes = destination.read_bytes()
+        with original_connect(readonly=readonly) as connection:
+            yield connection
+
+    monkeypatch.setattr(store, "connect", create_competing_backup)
+    with pytest.raises(FileExistsError):
+        store.backup(destination)
+
+    assert destination.read_bytes() == competing_bytes
+    assert list(backup_directory.iterdir()) == [destination]
+
+
+def test_failed_backup_does_not_publish_a_partial_destination(
+    store: MemoryStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backup_directory = tmp_path / "backups"
+    backup_directory.mkdir()
+    destination = backup_directory / "snapshot.sqlite"
+
+    class InterruptedSnapshot:
+        def backup(self, target: sqlite3.Connection) -> None:
+            target.execute("CREATE TABLE partial_snapshot(value TEXT)")
+            raise OSError("Snapshot interrupted")
+
+    @contextmanager
+    def interrupted_connect(readonly: bool = False) -> Iterator[InterruptedSnapshot]:
+        yield InterruptedSnapshot()
+
+    monkeypatch.setattr(store, "connect", interrupted_connect)
+    with pytest.raises(OSError, match="Snapshot interrupted"):
+        store.backup(destination)
+
+    assert not destination.exists()
+    assert list(backup_directory.iterdir()) == []
 
 
 def test_stale_generation_cannot_publish_results(store: MemoryStore) -> None:

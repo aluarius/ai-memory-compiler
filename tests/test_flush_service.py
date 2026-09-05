@@ -10,7 +10,7 @@ import pytest
 
 import flush_service
 from memory_export import ExportConflict
-from memory_store import MemoryStore
+from memory_store import MemoryStore, StoreConflict
 from model_runtime import ModelResult
 
 SAVED = "**Context:** SQLite memory migration\n\n**Lessons Learned:**\n- Acquire the runtime lock before claiming a job."
@@ -152,6 +152,33 @@ def test_provider_outage_does_not_permanently_quarantine_valid_context(store, mo
     for _ in range(4):
         assert flush_service.process_jobs(store, job_id=job_id, force=True) == 1
     assert store.jobs()[0]["status"] == "failed"
+
+
+def test_quarantine_counts_only_malformed_responses_not_provider_failures(store, monkeypatch):
+    job_id = enqueue(store, malformed_attempts=999)
+    async def failed(*args, **kwargs):
+        raise RuntimeError("Provider unavailable")
+    monkeypatch.setattr(flush_service, "call_readonly_model", failed)
+    for _ in range(2):
+        assert flush_service.process_jobs(store, job_id=job_id, force=True) == 1
+    stub_model(monkeypatch, "malformed")
+    assert flush_service.process_jobs(store, job_id=job_id, force=True) == 1
+    assert store.jobs()[0]["status"] == "failed"
+    assert flush_service.process_jobs(store, job_id=job_id, force=True) == 1
+    assert store.jobs()[0]["status"] == "failed"
+    assert flush_service.process_jobs(store, job_id=job_id, force=True) == 1
+    assert store.jobs()[0]["status"] == "quarantined"
+    assert store.jobs()[0]["attempts"] == 5
+
+
+def test_rejected_lease_cannot_increment_the_malformed_counter(store):
+    job_id = enqueue(store)
+    for expected_status in ("failed", "failed", "quarantined"):
+        lease = store.claim_job(job_id, force=True)
+        with pytest.raises(StoreConflict):
+            store.fail_job(job_id, "not-this-lease", "Malformed response", malformed_limit=3)
+        store.fail_job(job_id, lease["lease_token"], "Malformed response", malformed_limit=3)
+        assert store.jobs()[0]["status"] == expected_status
 
 
 def test_positional_bridge_reuses_migrated_recovery_range(store, monkeypatch):

@@ -9,8 +9,13 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from memory_store import MemoryStore
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 HOOKS_DIR = ROOT_DIR / "hooks"
@@ -119,6 +124,45 @@ def _prepare_legacy_import(args: argparse.Namespace) -> tuple[list[str], Path] |
     return cmd, temp_context
 
 
+def _requested_capture_jobs(
+    store: MemoryStore, args: argparse.Namespace, metadata: dict, *, raw_session_id: str,
+    new_ids: list[str],
+) -> list[dict]:
+    """Select only this transcript/session and fully contained requested ranges."""
+    identities = {
+        (args.agent, raw_session_id, str(args.transcript.resolve())),
+        (metadata["agent"], metadata["session_id"], metadata["transcript_path"]),
+    }
+    requested_start = max(args.after_message_count or 0, 0)
+    requested_end = args.until_message_count
+    new = set(new_ids)
+    selected = []
+    for job in store.jobs():
+        if job["kind"] != "flush":
+            continue
+        if job["id"] in new:
+            selected.append(job)
+            continue
+        if job["status"] == "done":
+            continue
+        captured = job["metadata"]
+        identity = captured.get("capture_identity")
+        if identity is not None:
+            matches = identity == metadata["capture_identity"]
+        else:
+            matches = (captured.get("agent"), captured.get("session_id"), captured.get("transcript_path")) in identities
+        start = captured.get("after_message_count", captured.get("after"))
+        end = captured.get("until_message_count", captured.get("until"))
+        if (
+            matches and isinstance(start, int) and not isinstance(start, bool)
+            and isinstance(end, int) and not isinstance(end, bool)
+            and requested_start <= start < end
+            and (requested_end is None or end <= requested_end)
+        ):
+            selected.append(job)
+    return selected
+
+
 def main() -> int:
     args = parse_args()
     transcript = args.transcript
@@ -128,14 +172,19 @@ def main() -> int:
 
     with writer_gate(ROOT_DIR) as canonical:
         if canonical:
-            from capture_service import capture_transcript
+            from capture_service import capture_metadata, capture_transcript, read_messages
             from memory_store import MemoryStore
 
             store = MemoryStore(ROOT_DIR)
-            ids = capture_transcript(store, transcript, {
+            overrides = {
                 "session_id": args.session_id, "agent": args.agent, "provider": args.provider,
                 "model": args.model, "cwd": args.cwd, "source": args.source,
-            }, after_message_count=args.after_message_count or None,
+            }
+            _, parsed = read_messages(transcript)
+            metadata = capture_metadata(transcript, overrides, parsed)
+            raw_session_id = args.session_id or parsed.get("session_id") or transcript.stem
+            ids = capture_transcript(store, transcript, overrides,
+                after_message_count=args.after_message_count or None,
                 until_message_count=args.until_message_count)
         else:
             prepared = _prepare_legacy_import(args)
@@ -147,12 +196,26 @@ def main() -> int:
     # that child while holding the parent gate; migration may import its
     # already persisted context before the child starts.
     if canonical:
-        from flush_service import process_jobs
+        from flush_service import maybe_trigger_compilation, process_jobs
 
-        for job_id in ids:
-            if process_jobs(store, job_id=job_id):
+        jobs = _requested_capture_jobs(store, args, metadata, raw_session_id=raw_session_id, new_ids=ids)
+        for job in jobs:
+            if job["status"] == "done":
+                continue
+            now = time.time()
+            if (
+                job["status"] == "quarantined" or job["next_attempt"] > now
+                or (job["status"] == "running" and (job["lease_until"] or 0) >= now)
+            ):
+                print("Requested capture remains unfinished; retry cooldown, quarantine or an active worker prevents processing.", file=sys.stderr)
                 return 1
-        return 0
+            if process_jobs(store, job_id=job["id"]):
+                return 1
+        requested_ids = {job["id"] for job in jobs}
+        if any(job["id"] in requested_ids and job["status"] != "done" for job in store.jobs()):
+            print("Requested capture remains unfinished; queued contexts were retained.", file=sys.stderr)
+            return 1
+        return maybe_trigger_compilation(store)
 
     completed = subprocess.run(cmd, cwd=str(ROOT_DIR), check=False)
     if completed.returncode != 0:

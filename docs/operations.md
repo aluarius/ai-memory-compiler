@@ -68,6 +68,12 @@ Capture persists sanitized context, provenance and checkpoint advancement in
 one transaction before it starts a detached worker. A failed spawn therefore
 leaves a recoverable job. Workers use expiring leases; an old worker cannot
 publish after another worker takes its lease.
+
+Provenance uses a shared scalar whitelist and secret redaction. Checkpoint keys
+and import scope use an opaque hash of the original transcript identity, so
+redacted identifiers cannot merge unrelated sessions. Existing checkpoint keys
+upgrade atomically on their next capture. Existing jobs and source history are
+not retroactively rewritten by this code update.
 Pending jobs older than one hour also produce an attention status, so a failed
 spawn cannot remain invisible indefinitely.
 During cutover, a contended migration lock never makes a synchronous hook wait
@@ -89,7 +95,8 @@ stops the batch. Canonical processing lives in `flush_service.process_jobs`;
 Provider and environment failures retain the context and apply a six-hour
 cooldown, including a worker-wide pause after runtime failure. They do not
 automatically quarantine jobs. Repeated structurally invalid extraction can
-quarantine a job after three attempts. Inspect quarantined records manually;
+quarantine a job after three malformed responses. A separate transactional
+counter excludes provider failures. Inspect quarantined records manually;
 neither normal retries nor `--force` bypass quarantine.
 
 After fixing the cause, an explicit retry can bypass cooldown:
@@ -101,6 +108,12 @@ uv run python scripts/flush.py --retry-failed --limit 1 --force
 Do not use force in unattended maintenance. A zero worker exit code can mean
 there was no eligible work, so check health again before declaring the queue
 empty. Never delete contexts or reset checkpoints to clear an alert.
+
+Repeating `import_session.py` retries unfinished jobs from that transcript,
+session and requested message range, even when its capture checkpoint already
+advanced. It does not drain unrelated jobs. Cooldown, quarantine or an active
+lease on unfinished requested work returns a nonzero exit code; already completed
+work remains successful. Successful imports also run the normal compile trigger.
 
 Job completion and the daily entry commit atomically. Capture time determines
 the source date. Export follows separately: if it fails, the completed job
@@ -248,6 +261,10 @@ but does not silently discard sessions based on an unproven checkpoint.
 ## Backup and restore
 
 Use `MemoryStore.backup(destination)`, which calls SQLite's online backup API.
+It builds the complete snapshot privately and publishes the destination
+exclusively. An existing file or symlink, including one created during the
+backup, is never overwritten. An interrupted backup does not publish a partial
+destination.
 Choose a new destination; the method refuses to overwrite an existing file.
 The backup is a standalone rollback-journal snapshot, safe to move and open
 read-only without WAL companions. Migration enables WAL after publishing the

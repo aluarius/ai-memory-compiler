@@ -67,6 +67,16 @@ def test_usage_recording_survives_corrupt_file(monkeypatch, tmp_path: Path) -> N
     assert data["article_reads"]["concepts/topic"]["count"] == 1
 
 
+def test_legacy_read_rejects_symlink_outside_knowledge(monkeypatch, tmp_path: Path) -> None:
+    concepts = _setup(monkeypatch, tmp_path)
+    outside = tmp_path / "outside.md"
+    outside.write_text("Outside knowledge", encoding="utf-8")
+    (concepts / "topic.md").symlink_to(outside)
+
+    assert mcp_server.read_article("concepts/topic").startswith("Invalid article path:")
+    assert not (tmp_path / "usage.json").exists()
+
+
 # ---------------------------------------------------------------------------
 # FTS-backed search with legacy fallback
 # ---------------------------------------------------------------------------

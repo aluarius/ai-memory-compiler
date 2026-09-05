@@ -40,6 +40,40 @@ def test_canonical_mcp_reads_survive_stale_or_absent_exports(tmp_path, monkeypat
     assert not (tmp_path / "scripts" / "usage.json").exists()
 
 
+@pytest.mark.parametrize("path", ["concepts/target", "concepts/target.md"])
+@pytest.mark.parametrize("symlink_directory", [False, True])
+def test_canonical_read_ignores_export_symlinks(tmp_path, monkeypatch, path, symlink_directory):
+    store = populated_store(tmp_path)
+    knowledge = tmp_path / "knowledge"
+    outside = tmp_path / "outside-export"
+    outside.mkdir()
+    (outside / "target.md").write_text("STALE EXPORT", encoding="utf-8")
+    knowledge.mkdir()
+    if symlink_directory:
+        (knowledge / "concepts").symlink_to(outside, target_is_directory=True)
+    else:
+        (knowledge / "concepts").mkdir()
+        (knowledge / "concepts" / "target.md").symlink_to(outside / "target.md")
+    monkeypatch.setattr(mcp_server, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(mcp_server, "KNOWLEDGE_DIR", knowledge)
+
+    result = mcp_server.read_article(path)
+
+    assert "Canonical sqlite target" in result
+    assert "STALE EXPORT" not in result
+    assert store.usage_counts()["concepts/target"] == 1
+
+
+@pytest.mark.parametrize("path", ["", "concepts/", "concepts/target/child", "concepts/../target", "/concepts/target"])
+def test_canonical_read_reports_invalid_identity_without_traceback(tmp_path, monkeypatch, path):
+    store = populated_store(tmp_path)
+    monkeypatch.setattr(mcp_server, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(mcp_server, "KNOWLEDGE_DIR", tmp_path / "knowledge")
+
+    assert mcp_server.read_article(path).startswith("Invalid article path:")
+    assert store.usage_counts() == {}
+
+
 def test_canonical_search_filters_project_before_limit_and_refreshes(tmp_path):
     store = populated_store(tmp_path)
     result = kb_db.search("sqlite", root=tmp_path, project="/repo/target/subdir", limit=1)

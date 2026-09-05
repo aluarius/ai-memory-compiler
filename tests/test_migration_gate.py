@@ -18,7 +18,27 @@ import pytest
 import import_session
 import migration_gate
 from locking import file_lock
-from memory_store import MemoryStore
+from memory_store import MemoryStore, StoreValidationError
+
+
+@pytest.mark.parametrize("occupied", ["directory", "dangling-symlink"])
+def test_invalid_database_path_never_runs_legacy_writer(tmp_path: Path, occupied: str) -> None:
+    database = tmp_path / "scripts/memory.sqlite"
+    database.parent.mkdir(parents=True)
+    if occupied == "directory":
+        database.mkdir()
+    else:
+        database.symlink_to(tmp_path / "unmounted/memory.sqlite")
+    legacy_output = tmp_path / "legacy-output.md"
+
+    @migration_gate.guard_legacy_writer(lambda: tmp_path)
+    def writer() -> None:
+        legacy_output.write_text("Legacy data must not diverge")
+
+    with pytest.raises(StoreValidationError):
+        writer()
+
+    assert not legacy_output.exists()
 
 
 def test_waiting_writer_selects_canonical_after_database_publication(tmp_path: Path) -> None:

@@ -155,6 +155,56 @@ def test_source_append_during_model_does_not_advance_past_processed_snapshot(sto
     assert len(service.pending_sources(store.snapshot())) == 1
 
 
+def test_full_replacement_preserves_omitted_project_scope(store, monkeypatch):
+    original = article()
+    store.commit_articles([original])
+    replacement = {key: value for key, value in original.items() if key != "projects"}
+    replacement["body"] += "\nAdditional supported facts.\n"
+    service = install_model(monkeypatch, json.dumps({"articles": [replacement]}))
+
+    asyncio.run(service.compile_source(store, SOURCE))
+
+    saved = store.read_article(original["path"])
+    assert saved["projects"] == ["example"]
+    assert saved["body"] == replacement["body"]
+
+
+@pytest.mark.parametrize("exact_edit", [False, True])
+def test_model_cannot_drop_previous_provenance(store, monkeypatch, exact_edit):
+    store.import_source("daily/2026-08-31.md", "Earlier evidence")
+    original = article()
+    old = "sources: [daily/2026-09-01.md, daily/2026-08-31.md]"
+    new = "sources: [daily/2026-09-01.md]"
+    original["body"] = original["body"].replace(new, old)
+    store.commit_articles([original])
+    replacement = ({"path": original["path"], "edits": [{"old": old, "new": new}]}
+                   if exact_edit else {**original, "body": original["body"].replace(old, new)})
+    service = install_model(monkeypatch, json.dumps({"articles": [replacement]}))
+    before = store.snapshot()
+
+    with pytest.raises(StoreValidationError, match="preserve.*sources"):
+        asyncio.run(service.compile_source(store, SOURCE))
+
+    assert store.snapshot() == before
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_compiled_change_must_cite_the_processed_source(store, monkeypatch, existing):
+    next_source = "daily/2026-09-02.md"
+    store.import_source(next_source, "New evidence for the article")
+    original = article()
+    if existing:
+        store.commit_articles([original])
+    replacement = {**original, "body": original["body"] + "\nNew evidence.\n"}
+    service = install_model(monkeypatch, json.dumps({"articles": [replacement]}))
+    before = store.snapshot()
+
+    with pytest.raises(StoreValidationError, match="processed source"):
+        asyncio.run(service.compile_source(store, next_source))
+
+    assert store.snapshot() == before
+
+
 @pytest.mark.parametrize("summary", ["A useful summary", "x" * 250])
 def test_exact_edits_commit_complete_revision_and_preserve_omitted_metadata(store, monkeypatch, summary):
     original = article(summary=summary)

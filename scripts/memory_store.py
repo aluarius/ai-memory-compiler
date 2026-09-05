@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
@@ -53,8 +55,12 @@ class MemoryStore:
     @staticmethod
     def is_initialized(root: Path) -> bool:
         store = MemoryStore(root, readonly=True)
-        if not store.db_path.is_file():
+        try:
+            store.db_path.lstat()
+        except FileNotFoundError:
             return False
+        if not store.db_path.is_file():
+            raise StoreValidationError(f"Memory database path is not a readable file: {store.db_path}")
         with store.connect(readonly=True) as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version != SCHEMA_VERSION:
@@ -357,15 +363,18 @@ class MemoryStore:
         return conn.execute("SELECT id FROM jobs WHERE dedup_key=?", (key,)).fetchone()[0]
 
     def capture_batch(self, key: str | None, *, expected: dict | None, checkpoint: dict | None,
-                      captures: list[dict]) -> list[str]:
+                      captures: list[dict], legacy_key: str | None = None) -> list[str]:
         """Persist every context and its source checkpoint in the same transaction."""
         with self.transaction() as conn:
             state = self._get(conn, "capture_checkpoints", {})
-            if key is not None and state.get(key) != expected:
+            previous = state.get(key, state.get(legacy_key))
+            if key is not None and previous != expected:
                 raise StoreConflict("Capture checkpoint changed concurrently")
             ids = [self._enqueue(conn, **capture) for capture in captures]
             if key is not None:
                 state[key] = checkpoint
+                if legacy_key is not None and legacy_key != key:
+                    state.pop(legacy_key, None)
                 self._set(conn, "capture_checkpoints", state)
             return ids
 
@@ -406,9 +415,24 @@ class MemoryStore:
             conn.execute("""UPDATE jobs SET status='done',result=?,lease_token=NULL,
                 lease_until=NULL,last_error=NULL,updated=? WHERE id=?""", (response, timestamp(), job_id))
 
-    def fail_job(self, job_id: str, token: str, error: str, *, delay_seconds: float = 300, quarantine: bool = False) -> None:
+    def fail_job(self, job_id: str, token: str, error: str, *, delay_seconds: float = 300,
+                 quarantine: bool = False, malformed_limit: int | None = None) -> None:
+        """Record a leased failure, counting malformed responses independently.
+
+        Passing malformed_limit increments a private per-job counter in the same
+        transaction as the failed lease outcome. Provider failures leave it alone.
+        """
+        if malformed_limit is not None and (
+            not isinstance(malformed_limit, int) or isinstance(malformed_limit, bool) or malformed_limit <= 0
+        ):
+            raise ValueError("Malformed response limit must be a positive integer")
         with self.transaction() as conn:
             self._require_lease(conn, job_id, token)
+            if malformed_limit is not None:
+                key = f"job_malformed_attempts:{job_id}"
+                count = self._get(conn, key, 0) + 1
+                self._set(conn, key, count)
+                quarantine = quarantine or count >= malformed_limit
             conn.execute("""UPDATE jobs SET status=?,last_error=?,next_attempt=?,lease_token=NULL,
                 lease_until=NULL,updated=? WHERE id=?""", ("quarantined" if quarantine else "failed", error[:2000],
                 time.time() + delay_seconds, timestamp(), job_id))
@@ -429,18 +453,23 @@ class MemoryStore:
             conn.execute("INSERT INTO runtime_events(kind,detail,created) VALUES (?,?,?)", (kind, detail[:4000], timestamp()))
 
     def backup(self, destination: Path) -> None:
-        if destination.exists():
+        """Publish a complete portable snapshot without replacing any destination."""
+        if destination.exists() or destination.is_symlink():
             raise FileExistsError(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect(readonly=True) as conn:
-            target = sqlite3.connect(destination)
-            try:
-                conn.backup(target)
-                # Publish a self-contained snapshot, not a WAL-mode main file
-                # whose first read-only connection may require missing sidecars.
-                target.execute("PRAGMA journal_mode=DELETE")
-            finally:
-                target.close()
+        with tempfile.TemporaryDirectory(prefix=f".{destination.name}.", dir=destination.parent) as temporary:
+            snapshot = Path(temporary) / "snapshot.sqlite"
+            with self.connect(readonly=True) as conn:
+                target = sqlite3.connect(snapshot)
+                try:
+                    conn.backup(target)
+                    # A relocated read-only backup must not need WAL sidecars.
+                    target.execute("PRAGMA journal_mode=DELETE")
+                finally:
+                    target.close()
+            # Another process may have created the destination during backup.
+            # Linking publishes atomically and never replaces that process's file.
+            os.link(snapshot, destination)
 
     def integrity_check(self) -> list[str]:
         with self.connect(readonly=True) as conn:

@@ -153,7 +153,8 @@ def _record_failure(store: MemoryStore, job: dict, detail: str, *, provider: boo
     """Keep the context and lease outcome; provider outages also throttle other jobs."""
     store.fail_job(
         job["id"], job["lease_token"], detail,
-        delay_seconds=RETRY_COOLDOWN_SECONDS, quarantine=not provider and job["attempts"] >= MAX_ATTEMPTS,
+        delay_seconds=RETRY_COOLDOWN_SECONDS,
+        malformed_limit=None if provider else MAX_ATTEMPTS,
     )
     if provider:
         store.set_state("flush_worker", {

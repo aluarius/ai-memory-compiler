@@ -85,6 +85,60 @@ def test_secrets_are_removed_before_queue_persistence(store, tmp_path):
     assert "super-secret-123" not in store.jobs()[0]["context"]
 
 
+def test_capture_redacts_metadata_and_uses_opaque_checkpoint_identity(store, tmp_path):
+    directory = tmp_path / "password=path-secret"
+    directory.mkdir()
+    path = directory / "session.jsonl"
+    transcript(path, ["Useful decision"])
+    capture_transcript(store, path, {
+        "cwd": "/project/password=cwd-secret", "session_id": "password=session-secret",
+        "unexpected": "unfiltered-private-payload",
+    })
+    persisted = json.dumps({"jobs": store.jobs(), "checkpoints": store.get_state("capture_checkpoints")})
+    for secret in ("path-secret", "cwd-secret", "session-secret", "unfiltered-private-payload"):
+        assert secret not in persisted
+    assert store.jobs()[0]["metadata"]["capture_identity"]
+
+
+def test_redacted_metadata_does_not_merge_distinct_capture_scopes(store, tmp_path):
+    path = tmp_path / "session.jsonl"
+    transcript(path, ["Identical text from separate sessions"])
+    first = capture_transcript(store, path, {"session_id": "password=first-secret"})
+    second = capture_transcript(store, path, {"session_id": "password=second-secret"})
+    assert first and second and first != second
+    jobs = store.jobs()
+    assert jobs[0]["metadata"]["session_id"] == jobs[1]["metadata"]["session_id"]
+    assert jobs[0]["metadata"]["capture_identity"] != jobs[1]["metadata"]["capture_identity"]
+
+
+@pytest.mark.parametrize("append", [False, True])
+def test_legacy_checkpoint_is_rekeyed_without_recapturing_history(store, tmp_path, append):
+    from capture_service import read_messages
+    from memory_store import content_hash
+
+    path = tmp_path / "session.jsonl"
+    transcript(path, ["Already captured"])
+    messages, metadata = read_messages(path)
+    legacy_key = f"codex:session-one:{path.resolve()}"
+    checkpoint = {"message_count": 1, "prefix_hash": content_hash("".join(messages)),
+                  "captured_at": "2026-09-06T01:00:00+05:00"}
+    original_ids = store.capture_batch(legacy_key, expected=None, checkpoint=checkpoint, captures=[{
+        "context": "".join(messages), "metadata": metadata, "identity": f"{legacy_key}:0:1:0",
+    }])
+    if append:
+        transcript(path, ["Already captured", "New decision"])
+
+    ids = capture_transcript(store, path, {})
+
+    assert len(ids) == int(append)
+    assert len(store.jobs()) == 1 + int(append)
+    assert store.jobs()[0]["id"] == original_ids[0]
+    checkpoints = store.get_state("capture_checkpoints")
+    assert legacy_key not in checkpoints
+    assert len(checkpoints) == 1
+    assert next(iter(checkpoints.values()))["message_count"] == 1 + int(append)
+
+
 def test_explicit_range_import_does_not_checkpoint_uncaptured_messages(store, tmp_path):
     path = tmp_path / "session.jsonl"
     transcript(path, ["first", "second", "third"])

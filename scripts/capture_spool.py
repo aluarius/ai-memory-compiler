@@ -17,16 +17,14 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
-from capture_service import MAX_JOB_CHARS, read_messages, sanitize, spawn_worker
+from capture_service import (
+    MAX_JOB_CHARS, PROVENANCE_KEYS, read_messages, sanitize, sanitize_metadata, spawn_worker,
+)
 from memory_export import ExportConflict, atomic_write
 from memory_store import MemoryStore, content_hash, timestamp
 from migration_gate import writer_gate
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-_PROVENANCE_KEYS = (
-    "agent", "provider", "session_id", "transcript_path", "cwd", "model",
-    "after_message_count", "until_message_count",
-)
 
 
 @contextmanager
@@ -76,16 +74,11 @@ def try_file_lock(path: Path) -> Iterator[bool]:
 
 def _metadata(values: dict[str, Any]) -> dict[str, Any]:
     """Persist explicit provenance scalars, never an unfiltered hook payload."""
-    allowed = {*_PROVENANCE_KEYS, "captured_at", "source", "turn_id", "event_date"}
-    return {
-        key: sanitize(value) if isinstance(value, str) else value
-        for key, value in values.items()
-        if key in allowed and isinstance(value, (str, int, float, bool))
-    }
+    return sanitize_metadata(values)
 
 
 def _identity(context: str, metadata: dict[str, Any]) -> str:
-    provenance = {key: metadata[key] for key in _PROVENANCE_KEYS if key in metadata}
+    provenance = {key: metadata[key] for key in PROVENANCE_KEYS if key in metadata}
     return content_hash(json.dumps({"context": context, "provenance": provenance}, ensure_ascii=False, sort_keys=True))
 
 

@@ -40,6 +40,9 @@ Paths use concepts/, connections/ or qa/ with lowercase hyphenated names.
 Summaries are nonempty, one line, at most 200 characters, without pipes or wikilinks.
 Preserve existing sources and useful facts in the resulting complete articles,
 and prefer updating an existing article over introducing a duplicate.
+Omitted projects also remain unchanged for full replacements of existing articles.
+Removing prior sources is forbidden; compilation changes must include the
+processed daily source in their YAML sources list.
 Only meaningful wikilinks to existing or proposed article paths are allowed.
 Read knowledge/index.md first, then snapshot/catalog.json for project/source metadata,
 and the full knowledge/*.md files of relevant articles.
@@ -87,6 +90,7 @@ def _materialize_edits(change: dict, existing: dict[str, dict]) -> dict:
 
 def parse_changes(
     response: str, *, allow_deletions: bool = False, existing_articles: Sequence[dict] = (),
+    required_source: str | None = None,
 ) -> tuple[list[dict], list[str], str]:
     """Reject malformed, ambiguous, empty, or unsupported model changes."""
     try:
@@ -106,6 +110,7 @@ def parse_changes(
     if not isinstance(reason, str) or (not changes and not deletions and not reason.strip()):
         raise StoreValidationError("An empty change set requires a nonempty no_changes_reason")
     existing = {item["path"]: item for item in existing_articles}
+    required_source = source_path(required_source) if required_source is not None else None
     materialized = []
     for change in changes:
         if not isinstance(change, dict) or set(change) - {"path", "body", "summary", "projects", "edits"}:
@@ -116,6 +121,14 @@ def parse_changes(
         if not {"path", "body", "summary"} <= change.keys():
             raise StoreValidationError("Every article change requires path, body and summary")
         parsed = parse_article(change)
+        original = existing.get(parsed["path"])
+        if original is not None:
+            if not set(original["sources"]) <= set(parsed["sources"]):
+                raise StoreValidationError(f"{parsed['path']}: model changes must preserve prior sources")
+            if "projects" not in change:
+                change = {**change, "projects": original["projects"]}
+        if required_source is not None and required_source not in parsed["sources"]:
+            raise StoreValidationError(f"{parsed['path']}: article must cite the processed source")
         if not inherited_summary and (len(parsed["summary"]) > MAX_SUMMARY_CHARS or "[[" in parsed["summary"]):
             raise StoreValidationError("Article summary exceeds the concise plain-text contract")
         materialized.append(change)
@@ -252,7 +265,9 @@ async def compile_source(
         "Read this complete source batch before proposing articles. Deletions are forbidden.",
         task="compile", source=(path, chunk),
     )
-    changes, _, reason = parse_changes(result.text, existing_articles=snapshot["articles"])
+    changes, _, reason = parse_changes(
+        result.text, existing_articles=snapshot["articles"], required_source=path,
+    )
     checkpoint = {
         "hash": hashlib.sha256(data[:end]).hexdigest(), "size": end,
         "compiled_at": timestamp(), "cost_usd": result.cost_usd,
