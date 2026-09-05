@@ -170,6 +170,9 @@ def migrate(root: Path, *, source_root: Path | None = None) -> dict:
             publish = Path(temporary) / "publish.sqlite"
             staged.backup(publish)
             os.replace(publish, root / "scripts/memory.sqlite")
+            # Re-establish WAL at the final location only after publishing a
+            # standalone backup. SQLite versions differ on first read-only WAL open.
+            MemoryStore(root).initialize()
         if root == source_root:
             # Publication is complete; retain imported spools and catch any
             # hook delivery that arrived while the migration gate was held.

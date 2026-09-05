@@ -436,6 +436,9 @@ class MemoryStore:
             target = sqlite3.connect(destination)
             try:
                 conn.backup(target)
+                # Publish a self-contained snapshot, not a WAL-mode main file
+                # whose first read-only connection may require missing sidecars.
+                target.execute("PRAGMA journal_mode=DELETE")
             finally:
                 target.close()
 

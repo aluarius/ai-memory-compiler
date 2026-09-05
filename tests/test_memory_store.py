@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,18 @@ def test_daily_links_outside_frontmatter_must_exist(store):
     with pytest.raises(StoreValidationError, match="missing"):
         store.commit_articles([article(links="[[daily/2026-09-02]]")])
     assert store.generation() == 0
+
+
+def test_backup_is_self_contained_and_readonly_after_relocation(store, tmp_path):
+    store.commit_articles([article()])
+    backup = tmp_path / "snapshot.sqlite"
+    store.backup(backup)
+    relocated = tmp_path / "relocated.sqlite"
+    backup.rename(relocated)
+    # A portable snapshot uses rollback-journal headers, not missing WAL sidecars.
+    assert relocated.read_bytes()[18:20] == b"\x01\x01"
+    with sqlite3.connect(relocated.as_uri() + "?mode=ro", uri=True) as connection:
+        assert connection.execute("SELECT count(*) FROM articles").fetchone()[0] == 1
 
 
 def test_stale_generation_cannot_publish_results(store: MemoryStore) -> None:
