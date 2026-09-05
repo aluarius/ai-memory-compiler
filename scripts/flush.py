@@ -29,6 +29,7 @@ from pathlib import Path
 from codex_exec import run_codex_prompt
 from config import DAILY_LOG_LOCK_FILE, LLM_LOCK_FILE
 from locking import file_lock
+from migration_gate import guard_legacy_writer
 from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from session_utils import SessionMetadata, format_session_header
 from utils import file_hash
@@ -224,38 +225,8 @@ def clean_flush_response(content: str) -> str:
 
 
 def build_flush_prompt(context: str) -> str:
-    return f"""Review the conversation context below and respond with a concise summary
-of important items that should be preserved in the daily log.
-Do NOT use any tools — just return plain text.
-
-Format your response as a structured daily log entry with these sections:
-
-**Context:** [One line about what the user was working on]
-
-**Key Exchanges:**
-- [Important Q&A or discussions]
-
-**Decisions Made:**
-- [Any decisions with rationale]
-
-**Lessons Learned:**
-- [Gotchas, patterns, or insights discovered]
-
-**Action Items:**
-- [Follow-ups or TODOs mentioned]
-
-Skip anything that is:
-- Routine tool calls or file reads
-- Content that's trivial or obvious
-- Trivial back-and-forth or clarification exchanges
-- Transcript scaffolding, assistant narration, or meta lines like "Attempting to read..." / "I'll check..."
-
-Only include sections that have actual content. If nothing is worth saving,
-respond with exactly: FLUSH_OK
-
-## Conversation Context
-
-{context}"""
+    from flush_service import build_flush_prompt as canonical_prompt
+    return canonical_prompt(context)
 
 
 async def run_flush_claude(prompt: str) -> str:
@@ -707,7 +678,12 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def main() -> None:
+@guard_legacy_writer(lambda: ROOT)
+def main() -> int | None:
+    from memory_store import MemoryStore
+    if MemoryStore.is_initialized(ROOT):
+        from flush_service import main as canonical_main
+        return canonical_main()
     args = parse_args()
 
     if args.retry_failed:
@@ -792,4 +768,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

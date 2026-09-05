@@ -41,6 +41,8 @@ from config import (
 )
 from kb_git import ensure_kb_repo, kb_commit, kb_rollback
 from locking import file_lock
+from memory_store import MemoryStore
+from migration_gate import guard_legacy_writer
 from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from utils import (
     INDEX_ROW_RE,
@@ -77,6 +79,11 @@ def select_candidates(max_candidates: int = MAX_CANDIDATES) -> list[dict]:
     pairs = kb_db.find_similar_pairs(limit=max_candidates * 2)
     if not pairs:
         return []
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        articles = {row["path"]: row for row in MemoryStore(KNOWLEDGE_DIR.parent).list_articles()}
+        return [{**pair, "updated_a": articles[pair["a"]]["updated"],
+                 "updated_b": articles[pair["b"]]["updated"]}
+                for pair in pairs if pair["a"] in articles and pair["b"] in articles][:max_candidates]
     dates = _index_updated_dates()
     candidates = []
     for pair in pairs:
@@ -265,6 +272,7 @@ def _record_consolidation() -> None:
     update_state(mutate)
 
 
+@guard_legacy_writer(lambda: KNOWLEDGE_DIR.parent)
 async def run_consolidation() -> bool:
     """One consolidation pass. Returns True on success (including no-op).
 
@@ -272,6 +280,14 @@ async def run_consolidation() -> bool:
     already holding it (flock re-entry from the same process would deadlock).
     The standalone CLI takes the lock in main().
     """
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        from compiler_service import consolidate_articles
+
+        try:
+            return await consolidate_articles(MemoryStore(KNOWLEDGE_DIR.parent), select_candidates())
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"Error: canonical consolidation failed: {exc}")
+            return False
     candidates = select_candidates()
     if not candidates:
         print("  Consolidation: no overlapping pairs.")
@@ -312,6 +328,7 @@ async def run_consolidation() -> bool:
     return True
 
 
+@guard_legacy_writer(lambda: KNOWLEDGE_DIR.parent)
 def main() -> int:
     parser = argparse.ArgumentParser(description="Merge or cross-link overlapping articles")
     parser.add_argument("--dry-run", action="store_true",

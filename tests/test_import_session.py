@@ -6,9 +6,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import import_session
+import pytest
 
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def isolated_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(import_session, "ROOT_DIR", tmp_path)
 
 
 def test_import_session_writes_only_the_reserved_codex_message_delta(

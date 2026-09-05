@@ -1,291 +1,277 @@
 # Operations
 
-This project is intentionally script-first. Use the commands below to inspect
-the memory pipeline before reaching for manual log parsing.
+After migration, `scripts/memory.sqlite` owns memory and pipeline state.
+Markdown, legacy JSON files and retrieval indexes are not recovery authorities.
+Run these commands from the repository root.
 
-## Health Check
-
-Run the local doctor command:
+## Start with health
 
 ```bash
 uv run python scripts/health.py
+uv run python scripts/health.py --json --strict
 ```
 
-The command performs only local I/O. It does not call an LLM and does not write
-lint reports or mutate the knowledge base.
+Health performs local checks without model calls. It reports the storage
+backend, database integrity, active and archived sources, compile checkpoints,
+job states, structural issues and export drift.
 
-Use `health.py` for quick operational triage. Use `lint.py` when you need a
-persisted markdown report in `reports/lint-YYYY-MM-DD.md` or the optional LLM
-contradiction check.
+Exit code `2` means structural errors. With `--strict`, other attention items
+return `1`; otherwise they can return `0`. Read the status and details, not
+only the non-strict exit code. An unreadable canonical store must not silently
+fall back to exported files.
 
-The semantic check selects up to 12 mutual full-text-search neighbours and
-sends their complete article pairs to the read-only LLM. This bounds request
-size and run time while requiring source-text verification before it reports
-an issue.
+## Runtime configuration
 
-It reports:
+`scripts/runtime-config.json` selects `flush_runtime`, `compile_runtime`
+and `lint_runtime` independently. Supported values are `claude` and `codex`.
+For example:
 
-- article and daily-log counts;
-- structural lint counts (including index hygiene);
-- uncompiled or stale daily logs;
-- preserved failed flush contexts in `reports/failed-flushes/`;
-- permanently failed contexts in `reports/failed-flushes/permanent/`;
-- pending temporary flush contexts in `scripts/`;
-- the latest compile and flush log status;
-- the configured runtime for `flush`, `compile`, and `lint`.
+```json
+{
+  "flush_runtime": "codex",
+  "compile_runtime": "codex",
+  "lint_runtime": "claude",
+  "codex_bin": "/absolute/path/to/codex",
+  "codex_model": null,
+  "claude_model": "claude-opus-4-8"
+}
+```
 
-Use JSON output when another script needs to consume the status:
+A nonempty project `codex_bin` pin wins over `MEMORY_CODEX_BIN`.
+Without a project pin, the environment override and executable discovery
+provide fallbacks. Point to the actual CLI, not a desktop wrapper. This matters
+for hooks, NVM installations and launchd, which may inherit a different PATH.
+`MEMORY_CODEX_MODEL` overrides `codex_model`.
+
+With a recent CLI that supports `--ignore-user-config`, the project can set
+`"codex_isolate_config": true` to exclude interactive MCP/plugin configuration
+and execution rules from background calls while retaining the CLI's credentials.
+Set `"codex_reasoning_effort": "medium"` to avoid inheriting interactive `xhigh`.
+These settings affect only this project's subprocesses. Validate the exact
+binary with a bounded smoke before enabling isolation; custom provider routing
+from the ignored global config will not be inherited.
+
+Compilation model calls default to 1,200 seconds per bounded batch.
+`MEMORY_COMPILE_TIMEOUT_SECONDS` accepts a positive finite number; invalid
+values use the default. Flush extraction has a 1,200-second model timeout
+and a longer job lease. Both Claude and Codex calls are bounded. Timeout or
+authentication failures retain work for inspection and retry.
+
+Compiler models receive read-only temporary snapshots and return the
+[validated JSON contract](../AGENTS.md#model-change-set-contract).
+They do not edit the live repository. Runtime credentials and billing remain
+the responsibility of the selected provider; local retrieval uses neither.
+
+## Durable capture and job recovery
+
+Capture persists sanitized context, provenance and checkpoint advancement in
+one transaction before it starts a detached worker. A failed spawn therefore
+leaves a recoverable job. Workers use expiring leases; an old worker cannot
+publish after another worker takes its lease.
+Pending jobs older than one hour also produce an attention status, so a failed
+spawn cannot remain invisible indefinitely.
+During cutover, a contended migration lock never makes a synchronous hook wait
+past its deadline: it persists sanitized text to `reports/capture-spool/` and
+detaches the waiting importer. Imported spool files remain under `imported/`.
+Unimported spools and capture failure records appear in health output.
 
 ```bash
-uv run python scripts/health.py --json
+uv run python scripts/flush.py --drain --limit 10
+uv run python scripts/flush.py --retry-failed --limit 5
 ```
 
-By default, attention items such as uncompiled daily logs or failed flush
-contexts do not make the command fail. Structural lint errors return a non-zero
-exit code. For automation that should fail on any attention item, use strict
-mode:
+`--drain` includes pending jobs, eligible failures and expired leases.
+`--retry-failed` restricts work to eligible failures and expired leases.
+Both respect retry cooldowns; their default limit is 100. A failed model call
+stops the batch. Canonical processing lives in `flush_service.process_jobs`;
+`flush.py` dispatches there for migrated stores.
+
+Provider and environment failures retain the context and apply a six-hour
+cooldown, including a worker-wide pause after runtime failure. They do not
+automatically quarantine jobs. Repeated structurally invalid extraction can
+quarantine a job after three attempts. Inspect quarantined records manually;
+neither normal retries nor `--force` bypass quarantine.
+
+After fixing the cause, an explicit retry can bypass cooldown:
 
 ```bash
-uv run python scripts/health.py --strict
+uv run python scripts/flush.py --retry-failed --limit 1 --force
 ```
 
-Exit codes:
+Do not use force in unattended maintenance. A zero worker exit code can mean
+there was no eligible work, so check health again before declaring the queue
+empty. Never delete contexts or reset checkpoints to clear an alert.
 
-- `0` means no structural errors were found.
-- `1` means strict mode found attention items.
-- `2` means structural lint errors were found.
+Job completion and the daily entry commit atomically. Capture time determines
+the source date. Export follows separately: if it fails, the completed job
+stays complete and its model response does not need to be regenerated.
+Legacy recovery files remain preserved after migration, including previously
+quarantined files under `reports/failed-flushes/permanent/`.
 
-## Reading The Output
-
-`Status: ok` means the local pipeline has no obvious action items.
-
-`Status: attention` means the knowledge base may still be structurally valid,
-but there is operational work to review. Common causes are:
-
-- daily logs waiting for compilation;
-- preserved failed flush contexts (will be retried automatically — see below);
-- permanently failed contexts that exceeded retry limits and need manual triage;
-- pending temporary context files from an interrupted import or flush;
-- the latest compile run ending in failure.
-
-An uncompiled log for the current day is normal — it compiles after the
-end-of-day window (22:00) or on the next morning's backlog pass. Logs from
-past days are picked up automatically by the daytime backlog trigger (see
-Compilation Triggers below).
-
-`Status: unhealthy` means structural lint found errors. Run:
+## Compilation and maintenance
 
 ```bash
-uv run python scripts/lint.py --fix
+uv run python scripts/compile.py --dry-run
+uv run python scripts/compile.py
+uv run python scripts/compile.py --skip-today
+uv run python scripts/index_rewrite.py --dry-run
+uv run python scripts/consolidate.py --dry-run
+uv run python scripts/lint.py --structural-only
 ```
 
-`--fix` repairs the mechanical classes automatically (symmetric backlinks,
-index stub rows for unindexed articles, collapsed source cells) and re-checks.
-Anything left over needs a human or the next compile pass.
+Compilation processes bounded source prefixes and commits articles, revisions,
+build events and the exact processed-byte checkpoint together. An interrupted
+later batch resumes from the committed prefix. A generation conflict rejects
+the stale proposal rather than overwriting newer memory.
 
-## Failed-Flush Lifecycle
+Summary rewriting changes metadata only. Consolidation accepts deletions only
+inside its validated candidate set and preserves valid remaining references.
+Neither operation delegates unrestricted file editing or Git rollback to a model.
 
-When a flush fails (SDK outage, locked keychain under launchd, etc.), its
-context is preserved in `reports/failed-flushes/` — a newer failure replaces
-an older snapshot of the same session. Codex range imports use one recovery
-identity per disjoint range, so a failure in a later range never replaces an
-earlier range. Recovery is layered:
+After successful queue work, automatic compilation handles past-day backlog
+during the day; after 22:00 local time it can include today's source.
+A 30-minute debounce limits repeated automatic triggers.
+`scripts/maintenance.py` drains the queue, performs maintenance and reports
+health. Review [the launchd template](launchd-maintenance.plist) before
+installing a scheduler; avoid duplicate schedules and duplicate hooks.
 
-1. **In-process retries** — every flush attempts up to 4 times with
-   3s/30s/180s backoff before preserving the context.
-2. **Opportunistic drain** — after every *successful* flush, up to 2 preserved
-   sessions are retried (the environment just proved the SDK works). Sessions
-   attempted within the last 6 hours are skipped (cooldown), so a burst of
-   flushes can't burn through the retry budget during one outage.
-3. **Nightly drain** — `scripts/maintenance.py` (launchd, 04:30) runs
-   `flush.py --retry-failed`, which bypasses the cooldown.
-4. **Permanent quarantine** — after 3 unsuccessful drain attempts (tracked in
-   `reports/failed-flushes/retry-state.json`), a session's contexts move to
-   `reports/failed-flushes/permanent/` and stop being retried. `health.py`
-   reports these; review and delete them manually.
-
-Manual drain at any time:
+## Markdown export and Obsidian
 
 ```bash
-uv run python scripts/flush.py --retry-failed
+uv run python scripts/memory_export.py
+uv run python scripts/memory_export.py --destination /absolute/path/to/new-export
 ```
 
-Concurrency note: all LLM flush calls are serialized through
-`scripts/.locks/flush-llm.lock`. Concurrent bundled-CLI instances crash each
-other; the lock makes bursts of session-end hooks queue instead of failing.
+Export projects one consistent database snapshot into article files, a
+generated catalog, a build log and daily sources. Each file replacement is
+atomic; the directory as a whole is not a transaction. Interrupted exports
+are retryable. Agents keep reading SQLite throughout.
 
-## Knowledge Base Versioning
+Outside edits are conflicts, not automatic imports. Review and preserve them
+before deciding whether to incorporate them through a validated canonical
+change or replace them. Unknown files are not wholesale deleted.
+Explicit `--force` preserves conflicting content under
+`reports/export-conflicts/`; replaced and retired content has recovery
+history under `reports/export-revisions/` and `reports/retired-exports/`.
 
-`knowledge/` contains a nested git repository (auto-created on the first
-compile after this feature landed; it is invisible to the outer repo because
-`knowledge/` is gitignored). The compile loop uses it for crash safety:
+Obsidian is an optional export reader. Editing its vault does not update
+canonical memory and can make the next export stop for conflict review.
+Use a separate export directory if that separation is easier to maintain.
 
-- before each log: `checkpoint before compile of <log>` commit captures any
-  outside changes (lint fixes, manual edits);
-- an inflight marker (`scripts/.locks/compile-inflight.json`) is written
-  before the LLM call and cleared after;
-- on a failed compile the run does `git reset --hard` + `clean -fd`, so the
-  failed log stays uncompiled and recompiles cleanly next trigger;
-- after a kill -9, the next compile run sees the stale marker and rolls back
-  the partial writes automatically — no manual reconciliation pass needed;
-  if the dead run had already recorded the log as compiled in
-  `scripts/state.json` (killed between its state update and its kb commit),
-  the recovery drops that entry so the rolled-back content recompiles;
-- on success: `compile <log>` commit, then one `post-compile maintenance`
-  commit for lint fixes / summary rewrite / archive-ref updates.
+## Retrieval and model cache
 
-Audit what any compile actually changed:
+BM25 reads canonical article records and requires no model. Hybrid retrieval
+adds local `intfloat/multilingual-e5-small` embeddings through optional
+FastEmbed. The installed FastEmbed integration registers the official small
+ONNX model explicitly; it does not substitute a third-party fork.
 
 ```bash
-git -C knowledge log --oneline
-git -C knowledge show <commit>
+uv sync --extra semantic
+uv run --extra semantic python scripts/semantic_search.py index
+uv run --extra semantic python scripts/evaluate_retrieval.py
+uv run python scripts/evaluate_retrieval.py --mode bm25
 ```
 
-Caveat: a rollback after a kill -9 also discards mechanical lint fixes made
-between the crash and the next compile; they are regenerated by the next
-`lint.py --fix` pass.
+Only the explicit index command can download model files.
+`scripts/.models/` stores the cache; ordinary queries use local files only.
+`scripts/semantic-index.sqlite` is a separate disposable SQLite database.
+Content and model fingerprints reject stale vectors, and reindexing reuses
+unchanged embeddings.
+Once explicitly enabled by creating the semantic index, successful compilation
+refreshes it from the local cache. Maintenance also runs an offline refresh.
+Neither automatic refresh downloads a model; unavailable semantics remain a
+visible lexical fallback rather than blocking canonical commits.
 
-## Index Summary Rewrite
+MCP hybrid search reports a lexical fallback if the cache or index is missing
+or stale. The evaluator instead reports hybrid as unavailable or failed, with
+no fabricated score. Missing expected article paths invalidate the fixture;
+missed questions remain in the report. See the
+[32-question measurement and limitations](storage-options.md#measured-retrieval).
 
-The compiler tends to append history to `knowledge/index.md` summaries
-instead of rewriting them; auto-stub rows also linger. `index_rewrite.py`
-detects both mechanically (rows over 200 chars, rows with the auto-stub
-marker) and rewrites them with batched single-turn LLM calls. The LLM returns
-plain `target: summary` lines; the script validates and applies them
-deterministically — malformed lines are dropped, never written.
+To reuse an already downloaded cache in another installation, copy the whole
+model cache with its `refs`, `snapshots` and `blobs` layout and preserve relative
+symlinks. Copying only `model.onnx` or only the snapshot directory is insufficient.
+The measured cache occupies about 465 MB on disk.
 
-It runs automatically post-compile (best-effort: failures never fail the
-compile) and in nightly maintenance. Manual:
+After moving the cache, explicitly reindex against that installation's current
+canonical articles, then evaluate offline. Rebuild the semantic index rather
+than raw-copying a SQLite file with possible WAL state. Restart that
+installation's MCP process after code or root changes; do not stop unrelated
+agent sessions.
+
+## Migration and cutover
+
+The migration gate prevents new-code legacy writers from completing after
+canonical publication. Spooling preserves hook deliveries while that gate is
+held. Processes already running old code still require an initial quiescence
+check; the copied-corpus evaluation alone does not prove live cutover or recovery.
+
+For a legacy installation:
+
+1. Identify the exact repository and deploy the new gated entry points.
+   Let old-code worker and maintenance processes finish before migration;
+   do not stop unrelated interactive agents. New-code hooks can spool during
+   the migration. For an older installation without this gate, pause captures.
+2. Run `uv run python scripts/memory_migrate.py` in that repository.
+   For rehearsal, use `--root /isolated/root --source-root /legacy/root`;
+   this reads the legacy corpus and writes only the isolated destination.
+3. Retain the tar under `reports/migration-backups/` and the original files.
+   Migration stages the database, checks integrity and article hashes, and
+   publishes only after validation. It preserves UTF-8 article/source bytes,
+   archived source aliases, legacy state and recoverable contexts.
+4. Inspect health, counts, source provenance and queued jobs. Repeated migration
+   recognizes an initialized store; an unknown existing database stops the
+   operation instead of being replaced.
+5. Reuse the model cache if available, explicitly reindex, and run retrieval
+   evaluation. Confirm direct article and source reads work without relying on
+   exported Markdown.
+6. Check the configured runtime, drain recoverable jobs, compile pending source
+   batches, and inspect every failure or quarantine. A completed migration
+   alone does not prove pipeline recovery.
+7. Export and review drift, then run the integrated acceptance gate. Resume
+   any processors you explicitly paused after checking its results.
+
+Migration does not delete the legacy corpus, nested Git history, temporary
+contexts or permanent-recovery directories.
+Legacy reservations were not proof of durable processing. Capture reuses
+retained recovery ranges only when their complete sanitized text matches the
+transcript. Unconfirmed historical ranges are conservatively recaptured and
+labelled `legacy_unverified`; this can introduce one-time duplicate summaries
+but does not silently discard sessions based on an unproven checkpoint.
+
+## Backup and restore
+
+Use `MemoryStore.backup(destination)`, which calls SQLite's online backup API.
+Choose a new destination; the method refuses to overwrite an existing file.
+For example, from the repository root:
 
 ```bash
-uv run python scripts/index_rewrite.py --dry-run   # list targets, free
-uv run python scripts/index_rewrite.py             # rewrite (LLM)
+PYTHONPATH=scripts uv run python -c 'from pathlib import Path; from memory_store import MemoryStore; MemoryStore(Path.cwd()).backup(Path("reports/backups/pre-maintenance.sqlite"))'
 ```
 
-## Consolidation Pass
+Retain the resulting database, migration tar and any export-conflict history.
+The model cache is reusable; the semantic index is rebuildable.
+Do not copy only `memory.sqlite` while a WAL database is active: committed data
+can still reside in its WAL. SQLite explains these constraints in its
+[WAL documentation](https://www.sqlite.org/wal.html).
 
-`consolidate.py` is the monthly "sleep" phase: it merges or cross-links
-overlapping articles so the KB stays dense as it approaches the ~500-article
-scale ceiling of index-based retrieval.
+Restore deliberately:
 
-- Candidates: mutually-nearest article pairs from the FTS index, ranked by
-  combined BM25 strength (capped at 12 pairs per pass). Inspect them for free
-  with `--dry-run`; `UNLINKED` marks pairs that do not even reference each
-  other.
-- The original rule (articles under 200 words, untouched for 14 days) was
-  dead on arrival: the compiler schema mandates 3-5 key points and 2+ detail
-  paragraphs, so nothing ever lands that thin (observed minimum: 214 words
-  across 449 articles) and every pass was a no-op. Topic overlap, not article
-  thinness, is what actually accumulates.
-- Per pair the LLM agent picks FOLD (merge duplicates), LINK (add reciprocal
-  Related Concepts links) or KEEP, biased toward the cheaper verdict when
-  uncertain. Merges are recorded in `reports/consolidate-manifest.txt`
-  (`DELETE concepts/x` lines); the agent never deletes files itself.
-- The script applies the manifest with a path allowlist and an inbound-link
-  guard, then runs structural checks; on errors the whole pass is rolled back
-  via the knowledge git repo.
-- Success is recorded as `last_consolidation` in `scripts/state.json`; the
-  next compile after 30 days triggers the next pass (post-compile, so it runs
-  in active hours with an unlocked keychain — not from 04:30 maintenance).
+1. Stop this installation's hooks, workers, MCP process and maintenance
+   scheduler. Prevent new captures during the restore window.
+2. Preserve the current database with the backup API if it is readable.
+   If it is damaged, preserve the stopped database and its WAL/SHM companions
+   together for investigation; do not treat that raw set as a verified backup.
+3. Validate the selected backup in an isolated root with integrity and content
+   checks. Confirm its timestamp and understand which newer jobs or sources
+   require recovery from the preserved current state.
+4. Move the old database and companions to a uniquely named recovery location
+   before installing the validated snapshot. Never attach stale WAL files to
+   the restored database, and never erase the recovery location as cleanup.
+5. Run health, recover newer work deliberately, regenerate exports and rebuild
+   retrieval indexes. Verify provenance and checkpoint consistency before
+   restarting the installation.
 
-Manual:
-
-```bash
-uv run python scripts/consolidate.py --dry-run   # list overlapping pairs, free
-uv run python scripts/consolidate.py             # run a pass (LLM, ~compile cost)
-```
-
-## Search Index (SQLite + FTS5)
-
-`scripts/kb-index.sqlite` is a derived, disposable FTS5 index over the
-markdown KB (markdown stays the source of truth). It is rebuilt after every
-compile and in nightly maintenance; rebuild takes seconds:
-
-```bash
-uv run python scripts/kb_db.py rebuild
-uv run python scripts/kb_db.py search "nginx stale inode"
-```
-
-Consumers and their fallbacks:
-
-- **MCP `search_knowledge`** — BM25-ranked (title×10, summary×5, body×1)
-  with snippets; falls back to the old linear scan when the DB is missing
-  or broken.
-- **Compile prompt** — `compile_index_mode: "tiered"` (runtime-config,
-  default) feeds the LLM a relevance-selected slice (recently updated rows +
-  FTS candidates matched against the day log + top hubs, ~5k tokens instead
-  of ~28k for the full index) plus an instruction to Grep the full index
-  before creating new articles. Set `"compile_index_mode": "full"` in
-  `scripts/runtime-config.json` to revert to the old whole-index prompt if
-  article quality degrades (watch for duplicate articles that a full index
-  would have prevented).
-
-A stale or corrupt index can only degrade ranking, never break the pipeline.
-
-## Compilation Triggers
-
-`compile.py` runs in three ways:
-
-- **End-of-day** — a successful flush after 22:00 triggers a full compile,
-  including today's log (original behavior). Debounced: if today's log was
-  compiled less than 30 minutes ago, the trigger is skipped and the appended
-  tail waits for the next flush outside the window or the morning backlog
-  (an active evening otherwise recompiles the day on every flush).
-- **Daytime backlog** — a successful flush at any hour triggers
-  `compile.py --skip-today` when logs from *past* days are uncompiled or
-  stale. This closes the gap where days whose last session ended before
-  22:00 never compiled.
-- **Manual** — `uv run python scripts/compile.py` (`--dry-run` to preview,
-  `--skip-today` to leave the growing log alone, `--all` to force).
-
-Recompiles of a grown log are **incremental**: daily logs are append-only, so
-when the previously compiled content is an exact prefix of the current file
-(verified by hash + stored `size` in `scripts/state.json`), only the appended
-tail goes to the LLM, with an explicit incremental marker in the prompt. This
-matters on active evenings — every post-22:00 flush triggers a compile, and
-before this change one day was fully recompiled 8 times (~$4.5 each). Any
-retroactive edit of already-compiled content falls back to a full recompile.
-
-Each single-log LLM compile is bounded by `MEMORY_COMPILE_TIMEOUT_SECONDS`
-(default: 1200 seconds). Lower it for debugging a stuck Claude SDK stream, for
-example `MEMORY_COMPILE_TIMEOUT_SECONDS=300 uv run python scripts/compile.py`.
-
-## Scheduled Maintenance
-
-`scripts/maintenance.py` runs nightly at 04:30 via launchd
-(`docs/launchd-maintenance.plist`, installed to `~/Library/LaunchAgents/`).
-The pass: drain failed flushes → `lint.py --fix` → full lint with the LLM
-contradiction check on Sundays → `health.py`, with a macOS notification when
-health is not ok. Logs to `scripts/maintenance.log`.
-
-Caveat: at 04:30 the machine may be locked; the bundled CLI then cannot reach
-the keychain and LLM steps fail harmlessly (the opportunistic drain covers
-recovery during active hours). The local-only steps (lint --fix, health) are
-unaffected.
-
-## Session-Start Context Budget
-
-The SessionStart hook injects at most ~9.5KB: today's date, the tail of the
-most recent daily log, then a tiered slice of the knowledge index (articles
-updated in the last 14 days + most-compiled hub articles). The budget stays
-under Claude Code's ~10KB hook-output threshold — larger payloads get
-persisted to a file instead of inlined, which defeats the purpose. Everything
-not in the slice is reachable via the `knowledge-base` MCP tools
-(`search_knowledge`, `read_article`, `list_articles`, `search_daily_logs`).
-
-Hub selection also weighs `scripts/usage.json` — read counters written by the
-MCP server's `read_article`. Articles actually read twice or more qualify as
-hubs even with a single compiled source, and frequently-read articles rank
-first. Delete the file to reset the counters; it is regenerated on the next
-read.
-
-## Recommended Manual Loop
-
-Usually nothing is needed — automation covers the routine. When checking in:
-
-1. Run `uv run python scripts/health.py`.
-2. If permanently failed contexts appear, review
-   `reports/failed-flushes/permanent/` and delete after triage.
-3. If structural errors appear, run `uv run python scripts/lint.py --fix`.
-4. If past-day logs stay uncompiled across days, check `scripts/compile.log`
-   for a failing compile.
+A Git checkout of exported articles is not a database restore. Article
+revisions support inspection of canonical history; use validated changes for
+targeted recovery instead of arbitrary SQL or filesystem replacement.

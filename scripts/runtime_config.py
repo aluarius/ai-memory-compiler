@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -13,6 +14,10 @@ DEFAULT_RUNTIME_CONFIG = {
     "compile_runtime": "claude",
     "lint_runtime": "claude",
     "codex_model": None,
+    # Project pin overrides stale binaries inherited from installed hooks/services.
+    "codex_bin": None,
+    "codex_isolate_config": False,
+    "codex_reasoning_effort": None,
     # Explicit model for claude-runtime LLM calls. Without it the bundled CLI
     # inherits the user's interactive default (e.g. Fable 5 after /model),
     # silently changing pipeline cost/behavior.
@@ -53,9 +58,36 @@ def get_task_runtime(task_name: str) -> str:
 
 
 def get_codex_model() -> str | None:
+    """Resolve the service model without changing the user's interactive config."""
     config = load_runtime_config()
-    model = config.get("codex_model")
-    return str(model) if model else None
+    model = os.environ.get("MEMORY_CODEX_MODEL", config.get("codex_model"))
+    if model is None:
+        return None
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Codex model must be a non-empty string or null")
+    return model
+
+
+def get_codex_bin() -> str | None:
+    """Return the project's explicit CLI pin; executable checks happen at launch."""
+    binary = load_runtime_config().get("codex_bin")
+    if binary is None:
+        return None
+    if not isinstance(binary, str) or not binary.strip():
+        raise ValueError("Codex binary must be a non-empty string or null")
+    return binary
+
+
+def get_codex_service_options() -> tuple[bool, str | None]:
+    """Opt into CLI-local isolation without changing credentials or global config."""
+    config = load_runtime_config()
+    isolated = config.get("codex_isolate_config", False)
+    effort = config.get("codex_reasoning_effort")
+    if not isinstance(isolated, bool):
+        raise ValueError("codex_isolate_config must be a boolean")
+    if effort is not None and effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+        raise ValueError("Unsupported codex_reasoning_effort")
+    return isolated, effort
 
 
 def get_compile_index_mode() -> str:

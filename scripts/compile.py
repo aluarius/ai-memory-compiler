@@ -42,6 +42,8 @@ from kb_git import (
     recover_interrupted_compile,
 )
 from locking import file_lock
+from memory_store import MemoryStore
+from migration_gate import guard_legacy_writer
 from runtime_config import (
     get_claude_model,
     get_codex_model,
@@ -467,11 +469,14 @@ def maybe_run_consolidation() -> None:
     _run_consolidation_pass()
 
 
+@guard_legacy_writer(lambda: ROOT_DIR)
 def main():
     parser = argparse.ArgumentParser(description="Compile daily logs into knowledge articles")
     parser.add_argument("--all", action="store_true", help="Force recompile all logs")
     parser.add_argument("--file", type=str, help="Compile a specific daily log file")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be compiled")
+    parser.add_argument("--batch-bytes", type=int, default=64_000,
+                        help="Maximum UTF-8 source bytes per canonical model call")
     parser.add_argument(
         "--skip-today",
         action="store_true",
@@ -480,6 +485,16 @@ def main():
     args = parser.parse_args()
 
     with file_lock(LOCKS_DIR / "compile.lock"):
+        if MemoryStore.is_initialized(ROOT_DIR):
+            from compiler_service import run_compile
+
+            status = asyncio.run(run_compile(
+                MemoryStore(ROOT_DIR), source=args.file, force=args.all,
+                skip_today=args.skip_today, dry_run=args.dry_run, max_batch_bytes=args.batch_bytes,
+            ))
+            if status:
+                sys.exit(status)
+            return
         state = load_state()
 
         # Determine which files to compile

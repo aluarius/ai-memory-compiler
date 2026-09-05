@@ -21,6 +21,8 @@ from pathlib import Path
 from codex_exec import run_codex_prompt
 from config import INDEX_FILE, KNOWLEDGE_DIR, LLM_LOCK_FILE
 from locking import file_lock
+from memory_store import MemoryStore
+from migration_gate import guard_legacy_writer
 from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from utils import INDEX_ROW_RE
 
@@ -48,6 +50,13 @@ def _article_excerpt(target: str) -> str:
 
 def collect_rewrite_targets() -> list[dict]:
     """Rows needing a rewrite: over-long summaries and auto-stub placeholders."""
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        from compiler_service import summary_targets
+
+        return [{"target": row["path"], "summary": row["summary"],
+                 "kind": "stub" if "auto-stub:" in row["summary"] else "long",
+                 "excerpt": row["body"][:ARTICLE_EXCERPT_CHARS]}
+                for row in summary_targets(MemoryStore(KNOWLEDGE_DIR.parent).snapshot())]
     if not INDEX_FILE.exists():
         return []
     targets = []
@@ -192,6 +201,7 @@ async def _call_llm(prompt: str) -> str:
         return response
 
 
+@guard_legacy_writer(lambda: KNOWLEDGE_DIR.parent)
 async def run_summary_rewrite(batch_size: int = BATCH_SIZE) -> int:
     """Rewrite all over-long/stub index summaries. Returns rows changed.
 
@@ -199,6 +209,10 @@ async def run_summary_rewrite(batch_size: int = BATCH_SIZE) -> int:
     was already applied — callers (post-compile) must never fail because of
     this pass.
     """
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        from compiler_service import rewrite_summaries
+
+        return await rewrite_summaries(MemoryStore(KNOWLEDGE_DIR.parent), batch_size=batch_size)
     targets = collect_rewrite_targets()
     if not targets:
         return 0
@@ -217,6 +231,7 @@ async def run_summary_rewrite(batch_size: int = BATCH_SIZE) -> int:
     return total
 
 
+@guard_legacy_writer(lambda: KNOWLEDGE_DIR.parent)
 def main() -> int:
     parser = argparse.ArgumentParser(description="Rewrite bloated index summaries")
     parser.add_argument("--dry-run", action="store_true",
@@ -230,9 +245,13 @@ def main() -> int:
         print(f"{len(targets)} target(s)")
         return 0
 
-    changed = asyncio.run(run_summary_rewrite())
+    try:
+        changed = asyncio.run(run_summary_rewrite())
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"Error: summary rewrite failed: {exc}")
+        return 1
     print(f"Rewrote {changed} index summaries")
-    if changed:
+    if changed and not MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
         from kb_git import ensure_kb_repo, kb_commit
 
         ensure_kb_repo()

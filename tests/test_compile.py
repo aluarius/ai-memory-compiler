@@ -75,6 +75,7 @@ def _wire_main(monkeypatch, tmp_path, compile_result):
 
     monkeypatch.setattr(compile_script, "list_raw_files", lambda: [log])
     monkeypatch.setattr(compile_script, "load_state", lambda: {"ingested": {}})
+    monkeypatch.setattr(compile_script, "ROOT_DIR", tmp_path)
     monkeypatch.setattr(compile_script, "LOCKS_DIR", tmp_path / ".locks")
     monkeypatch.setattr(compile_script, "list_wiki_articles", lambda: [])
     monkeypatch.setattr(compile_script, "run_post_compile_lint", lambda: 0)

@@ -5,6 +5,122 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import lint
+import pytest
+from memory_export import ExportConflict, export_memory
+from memory_store import MemoryStore
+from model_runtime import ModelResult
+
+
+def _canonical_graph(monkeypatch, tmp_path: Path) -> MemoryStore:
+    store = MemoryStore(tmp_path)
+    store.initialize()
+    store.import_source("daily/2026-09-01.md", "Source")
+    changes = []
+    for name, links in [("alpha", "[[concepts/beta]]"), ("beta", "")]:
+        changes.append({
+            "path": f"concepts/{name}", "summary": name,
+            "body": f"---\ntitle: {name}\nsources: [daily/2026-09-01.md]\ncreated: 2026-09-01\nupdated: 2026-09-01\n---\n# {name}\n{links}\n[[daily/2026-09-01]]\n",
+        })
+    store.commit_articles(changes)
+    monkeypatch.setattr(lint, "KNOWLEDGE_DIR", tmp_path / "knowledge")
+    return store
+
+
+def test_canonical_lint_reads_each_article_once_without_exports(monkeypatch, tmp_path: Path) -> None:
+    _canonical_graph(monkeypatch, tmp_path)
+    calls = []
+    extract = lint.extract_wikilinks
+    def observe(text: str) -> list[str]:
+        calls.append(text)
+        return extract(text)
+    monkeypatch.setattr(lint, "extract_wikilinks", observe)
+    issues = lint.structural_checks()
+    assert len(calls) == 2
+    assert not [item for item in issues if item["severity"] == "error"]
+    backlinks = [item for item in issues if item["check"] == "missing_backlink"]
+    assert [(item["source"], item["target"]) for item in backlinks] == [("concepts/alpha", "concepts/beta")]
+
+
+def test_canonical_mechanical_fixes_commit_then_export(monkeypatch, tmp_path: Path) -> None:
+    store = _canonical_graph(monkeypatch, tmp_path)
+    counts = lint.apply_fixes(lint.structural_checks())
+    assert counts["backlinks_added"] == 1
+    beta = store.read_article("concepts/beta")
+    assert beta["revision"] == 2
+    assert "[[concepts/alpha]]" in beta["body"]
+    assert (tmp_path / "knowledge/concepts/beta.md").read_text() == beta["body"]
+    assert not [item for item in lint.structural_checks() if item["check"] == "missing_backlink"]
+
+
+def test_canonical_fix_preserves_external_export_edits(monkeypatch, tmp_path: Path) -> None:
+    store = _canonical_graph(monkeypatch, tmp_path)
+    export_memory(store)
+    path = tmp_path / "knowledge/concepts/beta.md"
+    path.write_text("External edits must survive")
+    with pytest.raises(ExportConflict):
+        lint.apply_fixes(lint.structural_checks())
+    assert path.read_text() == "External edits must survive"
+    assert store.read_article("concepts/beta")["revision"] == 2
+    assert "[[concepts/alpha]]" in store.read_article("concepts/beta")["body"]
+
+
+def test_lint_corrupt_canonical_database_does_not_read_legacy_files(monkeypatch, tmp_path: Path) -> None:
+    _canonical_graph(monkeypatch, tmp_path)
+    (tmp_path / "scripts/memory.sqlite").write_bytes(b"invalid sqlite")
+    def legacy_read() -> list[Path]:
+        raise AssertionError("Canonical corruption must not select Markdown")
+    monkeypatch.setattr(lint, "list_wiki_articles", legacy_read)
+    issues = lint.structural_checks()
+    assert len(issues) == 1
+    assert issues[0]["check"] == "database"
+    assert issues[0]["severity"] == "error"
+
+
+def test_canonical_semantic_candidates_use_database_bodies(monkeypatch, tmp_path: Path) -> None:
+    _canonical_graph(monkeypatch, tmp_path)
+    monkeypatch.setattr(lint.kb_db, "find_similar_pairs", lambda limit: [{"a": "concepts/alpha", "b": "concepts/beta"}])
+    blocks = lint._semantic_candidate_blocks()
+    assert len(blocks) == 1
+    assert "# alpha" in blocks[0]
+    assert "# beta" in blocks[0]
+
+
+def test_canonical_semantic_lint_uses_disposable_readonly_runtime_and_rejects_invalid_result(monkeypatch, tmp_path: Path) -> None:
+    store = _canonical_graph(monkeypatch, tmp_path)
+    monkeypatch.setattr(lint.kb_db, "find_similar_pairs", lambda limit: [{"a": "concepts/alpha", "b": "concepts/beta"}])
+    monkeypatch.setattr(lint, "file_lock", lambda _: nullcontext())
+    seen = []
+    async def call(prompt: str, *, cwd: Path, task: str) -> ModelResult:
+        assert not cwd.is_relative_to(tmp_path)
+        assert task == "lint"
+        assert "# alpha" in prompt
+        seen.append(cwd)
+        return ModelResult(text="unstructured output")
+    monkeypatch.setattr(lint, "call_readonly_model", call)
+    before = store.snapshot()
+    issues = asyncio.run(lint.check_contradictions())
+    assert issues[0]["severity"] == "error"
+    assert store.snapshot() == before
+    assert seen and not seen[0].exists()
+
+
+def test_legacy_orphan_check_reads_linear_number_of_bodies(monkeypatch, tmp_path: Path) -> None:
+    directory = tmp_path / "knowledge/concepts"
+    directory.mkdir(parents=True)
+    articles = [directory / f"article-{i}.md" for i in range(8)]
+    for article in articles:
+        article.write_text("[[concepts/article-0]]")
+    monkeypatch.setattr(lint, "KNOWLEDGE_DIR", directory.parent)
+    monkeypatch.setattr(lint, "list_wiki_articles", lambda: articles)
+    calls = []
+    original = Path.read_text
+    def observe(path: Path, *args, **kwargs) -> str:
+        if path in articles:
+            calls.append(path)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", observe)
+    lint.check_orphan_pages()
+    assert len(calls) == len(articles)
 
 
 def test_contradiction_check_uses_bounded_full_text_candidates(

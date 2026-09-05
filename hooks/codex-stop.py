@@ -28,8 +28,9 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from locking import file_lock
-from session_utils import codex_message_ranges
+from locking import file_lock  # noqa: E402 - scripts path is configured above.
+from capture_spool import guard_capture_hook  # noqa: E402
+from session_utils import codex_message_ranges  # noqa: E402
 
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 DEDUP_FILE = SCRIPTS_DIR / ".last-codex-import.json"
@@ -334,6 +335,7 @@ def _transcript_mtime_ns(transcript: Path) -> int:
         return 0
 
 
+@guard_capture_hook(lambda: ROOT, agent="codex", source="hook:stop")
 def main() -> None:
     hook_input = parse_hook_input(sys.stdin.read())
 
@@ -344,6 +346,14 @@ def main() -> None:
     if transcript is None:
         transcript, meta = resolve_legacy_transcript()
     if transcript is None:
+        return
+
+    from memory_store import MemoryStore
+    if MemoryStore.is_initialized(ROOT):
+        from capture_service import capture_transcript, spawn_worker
+        store = MemoryStore(ROOT)
+        ids = capture_transcript(store, transcript, {**meta, "agent": "codex"})
+        spawn_worker(store, ids)
         return
 
     import_key = build_import_key(
@@ -423,4 +433,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

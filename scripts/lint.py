@@ -15,28 +15,33 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
+import sqlite3
 import sys
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import kb_db
+from article_schema import source_path
 from codex_exec import run_codex_prompt
 from config import KNOWLEDGE_DIR, LLM_LOCK_FILE, REPORTS_DIR, now_iso, today_iso
 from locking import file_lock
+from memory_export import export_memory
+from memory_store import MemoryStore
+from migration_gate import guard_legacy_writer
+from model_runtime import call_readonly_model
 from runtime_config import get_claude_model, get_codex_model, get_task_runtime
 from utils import (
     INDEX_ROW_RE,
-    count_inbound_links,
     daily_source_exists,
     extract_wikilinks,
     file_hash,
     find_missing_index_targets,
     find_unindexed_articles,
-    get_article_word_count,
     list_raw_files,
     list_wiki_articles,
     load_state,
     update_state,
-    wiki_article_exists,
 )
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -44,15 +49,57 @@ MAX_SEMANTIC_LINT_CANDIDATES = 12
 MAX_SEMANTIC_LINT_PROMPT_CHARS = 750_000
 
 
-def check_broken_links() -> list[dict]:
+@dataclass(frozen=True)
+class GraphSnapshot:
+    articles: dict[str, dict]
+    links: dict[str, set[str]]
+    inbound: dict[str, set[str]]
+    sources: set[str]
+    canonical: dict | None = None
+
+
+def load_graph(snapshot: dict | None = None) -> GraphSnapshot:
+    """Parse every body once and build adjacency in O(articles + links)."""
+    if snapshot is None and MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        snapshot = MemoryStore(KNOWLEDGE_DIR.parent, readonly=True).snapshot()
+    if snapshot is not None:
+        articles = {article["path"]: article for article in snapshot["articles"]}
+    else:
+        articles = {
+            path.relative_to(KNOWLEDGE_DIR).as_posix().removesuffix(".md"): {
+                "body": path.read_text(encoding="utf-8"),
+            }
+            for path in list_wiki_articles()
+        }
+    links = {
+        path: {link.split("#", 1)[0].removesuffix(".md") for link in extract_wikilinks(article["body"]) if link.split("#", 1)[0]}
+        for path, article in articles.items()
+    }
+    inbound: dict[str, set[str]] = {path: set() for path in articles}
+    for path, targets in links.items():
+        for target in targets:
+            if target in inbound and target != path:
+                inbound[target].add(path)
+    return GraphSnapshot(
+        articles=articles, links=links, inbound=inbound,
+        sources={source["path"] for source in snapshot["sources"]} if snapshot is not None else set(),
+        canonical=snapshot,
+    )
+
+
+def check_broken_links(graph: GraphSnapshot | None = None) -> list[dict]:
     """Check for [[wikilinks]] that point to non-existent articles."""
     issues = []
-    for article in list_wiki_articles():
-        content = article.read_text(encoding="utf-8")
-        rel = article.relative_to(KNOWLEDGE_DIR)
-        for link in extract_wikilinks(content):
+    graph = graph or load_graph()
+    for article, links in graph.links.items():
+        rel = f"{article}.md"
+        for link in sorted(links):
             if link.startswith("daily/"):
-                if not daily_source_exists(link):
+                try:
+                    exists = source_path(link) in graph.sources if graph.canonical is not None else daily_source_exists(link)
+                except ValueError:
+                    exists = False
+                if not exists:
                     issues.append({
                         "severity": "error",
                         "check": "broken_link",
@@ -60,7 +107,7 @@ def check_broken_links() -> list[dict]:
                         "detail": f"Broken source link: [[{link}]] - daily log does not exist",
                     })
                 continue
-            if not wiki_article_exists(link):
+            if link not in graph.articles:
                 issues.append({
                     "severity": "error",
                     "check": "broken_link",
@@ -70,9 +117,14 @@ def check_broken_links() -> list[dict]:
     return issues
 
 
-def check_index_consistency() -> list[dict]:
+def check_index_consistency(graph: GraphSnapshot | None = None) -> list[dict]:
     """Check that every article on disk is reachable from knowledge/index.md."""
     issues = []
+    if (graph is not None and graph.canonical is not None) or (
+        graph is None and MemoryStore.is_initialized(KNOWLEDGE_DIR.parent)
+    ):
+        # The index is generated from the article table; export drift is operational.
+        return issues
 
     for link in find_unindexed_articles():
         issues.append({
@@ -98,14 +150,13 @@ def check_index_consistency() -> list[dict]:
     return issues
 
 
-def check_orphan_pages() -> list[dict]:
+def check_orphan_pages(graph: GraphSnapshot | None = None) -> list[dict]:
     """Check for articles with zero inbound links."""
     issues = []
-    for article in list_wiki_articles():
-        rel = article.relative_to(KNOWLEDGE_DIR)
-        link_target = str(rel).replace(".md", "").replace("\\", "/")
-        inbound = count_inbound_links(link_target)
-        if inbound == 0:
+    graph = graph or load_graph()
+    for link_target in sorted(graph.articles):
+        rel = f"{link_target}.md"
+        if not graph.inbound[link_target]:
             issues.append({
                 "severity": "warning",
                 "check": "orphan_page",
@@ -115,8 +166,13 @@ def check_orphan_pages() -> list[dict]:
     return issues
 
 
-def check_orphan_sources() -> list[dict]:
+def check_orphan_sources(graph: GraphSnapshot | None = None) -> list[dict]:
     """Check for daily logs that haven't been compiled yet."""
+    graph = graph or load_graph()
+    if graph.canonical is not None:
+        uncompiled, _ = source_backlog(graph.canonical)
+        return [{"severity": "warning", "check": "orphan_source", "file": f"daily/{name}",
+                 "detail": f"Uncompiled daily log: {name} has not been ingested"} for name in uncompiled]
     state = load_state()
     ingested = state.get("ingested", {})
     issues = []
@@ -131,8 +187,13 @@ def check_orphan_sources() -> list[dict]:
     return issues
 
 
-def check_stale_articles() -> list[dict]:
+def check_stale_articles(graph: GraphSnapshot | None = None) -> list[dict]:
     """Check if source daily logs have changed since compilation."""
+    graph = graph or load_graph()
+    if graph.canonical is not None:
+        _, stale = source_backlog(graph.canonical)
+        return [{"severity": "warning", "check": "stale_article", "file": f"daily/{name}",
+                 "detail": f"Stale: {name} has changed since last compilation"} for name in stale]
     state = load_state()
     ingested = state.get("ingested", {})
     issues = []
@@ -151,21 +212,32 @@ def check_stale_articles() -> list[dict]:
     return issues
 
 
-def check_missing_backlinks() -> list[dict]:
+def source_backlog(snapshot: dict) -> tuple[list[str], list[str]]:
+    """Compare canonical source hashes with committed ingestion checkpoints."""
+    ingested = snapshot["pipeline"].get("ingested", {})
+    uncompiled: list[str] = []
+    stale: list[str] = []
+    for source in snapshot["sources"]:
+        name = source["path"].removeprefix("daily/")
+        metadata = ingested.get(name)
+        if metadata is None:
+            uncompiled.append(name)
+        else:
+            digest = metadata.get("hash")
+            if not isinstance(digest, str) or len(digest) not in (16, 64) or not source["content_hash"].startswith(digest):
+                stale.append(name)
+    return uncompiled, stale
+
+
+def check_missing_backlinks(graph: GraphSnapshot | None = None) -> list[dict]:
     """Check for asymmetric links: A links to B but B doesn't link to A."""
     issues = []
-    for article in list_wiki_articles():
-        content = article.read_text(encoding="utf-8")
-        rel = article.relative_to(KNOWLEDGE_DIR)
-        source_link = str(rel).replace(".md", "").replace("\\", "/")
-
-        for link in extract_wikilinks(content):
-            if link.startswith("daily/"):
-                continue
-            target_path = KNOWLEDGE_DIR / f"{link}.md"
-            if target_path.exists():
-                target_content = target_path.read_text(encoding="utf-8")
-                if source_link not in extract_wikilinks(target_content):
+    graph = graph or load_graph()
+    for source_link, links in graph.links.items():
+        rel = f"{source_link}.md"
+        for link in sorted(links):
+            if link in graph.articles:
+                if source_link not in graph.links[link]:
                     issues.append({
                         "severity": "suggestion",
                         "check": "missing_backlink",
@@ -193,7 +265,7 @@ def _looks_like_sources_cell(cell: str) -> bool:
     return bool(parts) and all(_SOURCE_PART_RE.match(p) for p in parts)
 
 
-def check_index_hygiene() -> list[dict]:
+def check_index_hygiene(graph: GraphSnapshot | None = None) -> list[dict]:
     """Flag index rows that bloat the index: run-on summaries and source sprawl.
 
     The session-start hook injects a tiered slice of the index into every
@@ -201,6 +273,14 @@ def check_index_hygiene() -> list[dict]:
     one line of essence, and long source lists should collapse to
     'first, latest +N more'.
     """
+    if graph is None and MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        graph = load_graph()
+    if graph is not None and graph.canonical is not None:
+        return [{
+            "severity": "suggestion", "check": "index_hygiene", "subcheck": "long_summary",
+            "file": f"{path}.md", "target": path,
+            "detail": f"Index summary is {len(article['summary'])} chars (max {MAX_INDEX_SUMMARY_CHARS}).",
+        } for path, article in graph.articles.items() if len(article["summary"]) > MAX_INDEX_SUMMARY_CHARS]
     index_path = KNOWLEDGE_DIR / "index.md"
     if not index_path.exists():
         return []
@@ -256,6 +336,8 @@ def check_index_hygiene() -> list[dict]:
 
 def fix_index_source_sprawl(issues: list[dict]) -> int:
     """Collapse sprawling source cells to 'first, latest +N more'. Returns rows fixed."""
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        return 0  # Canonical export already limits the sources cell.
     index_path = KNOWLEDGE_DIR / "index.md"
     if not index_path.exists():
         return 0
@@ -287,13 +369,15 @@ def fix_index_source_sprawl(issues: list[dict]) -> int:
     return fixed
 
 
-def check_sparse_articles() -> list[dict]:
+def check_sparse_articles(graph: GraphSnapshot | None = None) -> list[dict]:
     """Check for articles with fewer than 200 words."""
     issues = []
-    for article in list_wiki_articles():
-        word_count = get_article_word_count(article)
+    graph = graph or load_graph()
+    for path, article in graph.articles.items():
+        body = re.sub(r"\A---\r?\n.*?\r?\n---(?:\r?\n|\Z)", "", article["body"], count=1, flags=re.DOTALL)
+        word_count = len(body.split())
         if word_count < 200:
-            rel = article.relative_to(KNOWLEDGE_DIR)
+            rel = f"{path}.md"
             issues.append({
                 "severity": "suggestion",
                 "check": "sparse_article",
@@ -307,22 +391,13 @@ def check_weak_connectivity(
     max_issues: int = 25,
     min_inbound_links: int = 2,
     min_total_links: int = 4,
+    graph: GraphSnapshot | None = None,
 ) -> list[dict]:
     """Identify articles that are reachable but weakly connected to the graph."""
-    articles = list_wiki_articles()
-    article_links = {
-        str(article.relative_to(KNOWLEDGE_DIR)).replace(".md", "").replace("\\", "/")
-        for article in articles
-    }
-    outbound: dict[str, set[str]] = {link: set() for link in article_links}
-    inbound: dict[str, set[str]] = {link: set() for link in article_links}
-
-    for article in articles:
-        source = str(article.relative_to(KNOWLEDGE_DIR)).replace(".md", "").replace("\\", "/")
-        for target in extract_wikilinks(article.read_text(encoding="utf-8")):
-            if target in article_links:
-                outbound[source].add(target)
-                inbound[target].add(source)
+    graph = graph or load_graph()
+    article_links = graph.articles.keys()
+    outbound = {path: (links & article_links) - {path} for path, links in graph.links.items()}
+    inbound = graph.inbound
 
     candidates = []
     for link in sorted(article_links):
@@ -362,14 +437,22 @@ def _semantic_candidate_blocks() -> list[str] | None:
 
     blocks: list[str] = []
     size = 0
+    store = MemoryStore(KNOWLEDGE_DIR.parent, readonly=True) if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent) else None
+    canonical = {article["path"]: article for article in store.snapshot()["articles"]} if store else None
     for pair in pairs:
         a = pair.get("a")
         b = pair.get("b")
         if not isinstance(a, str) or not isinstance(b, str):
             continue
         try:
-            a_body = (KNOWLEDGE_DIR / f"{a}.md").read_text(encoding="utf-8")
-            b_body = (KNOWLEDGE_DIR / f"{b}.md").read_text(encoding="utf-8")
+            if canonical is not None:
+                a_article, b_article = canonical.get(a), canonical.get(b)
+                if a_article is None or b_article is None:
+                    raise ValueError("Semantic candidate missing from canonical memory")
+                a_body, b_body = a_article["body"], b_article["body"]
+            else:
+                a_body = (KNOWLEDGE_DIR / f"{a}.md").read_text(encoding="utf-8")
+                b_body = (KNOWLEDGE_DIR / f"{b}.md").read_text(encoding="utf-8")
         except OSError:
             continue
 
@@ -417,7 +500,10 @@ Do NOT output anything else - no preamble, no explanation, just the formatted li
 
 async def check_contradictions() -> list[dict]:
     """Use an LLM to verify bounded full-text candidates for contradictions."""
-    candidate_blocks = _semantic_candidate_blocks()
+    try:
+        candidate_blocks = _semantic_candidate_blocks()
+    except (sqlite3.Error, ValueError, OSError) as exc:
+        return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": f"Semantic candidates unavailable: {exc}"}]
     if candidate_blocks is None:
         return [{
             "severity": "error",
@@ -435,7 +521,11 @@ async def check_contradictions() -> list[dict]:
         # Serialize against flush/compile LLM calls — concurrent bundled-CLI
         # instances crash each other with exit 1.
         with file_lock(LLM_LOCK_FILE):
-            if runtime == "codex":
+            if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+                with tempfile.TemporaryDirectory(prefix="memory-lint-") as temporary:
+                    result = await call_readonly_model(prompt, cwd=Path(temporary), task="lint")
+                    response = result.text
+            elif runtime == "codex":
                 response = await asyncio.to_thread(
                     run_codex_prompt,
                     prompt,
@@ -456,7 +546,10 @@ async def check_contradictions() -> list[dict]:
                     options=ClaudeAgentOptions(
                         cwd=str(ROOT_DIR),
                         model=get_claude_model(),
+                        tools=[],
                         allowed_tools=[],
+                        setting_sources=[],
+                        env={"CLAUDE_INVOKED_BY": "memory_lint", "MEMORY_COMPILER_INTERNAL": "1"},
                         max_turns=2,
                     ),
                 ):
@@ -467,19 +560,12 @@ async def check_contradictions() -> list[dict]:
     except Exception as e:  # noqa: BLE001 - the external LLM boundary must never abort lint.
         return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": f"LLM check failed: {e}"}]
 
-    issues = []
-    if "NO_ISSUES" not in response:
-        for line in response.strip().split("\n"):
-            line = line.strip()
-            if line.startswith(("CONTRADICTION:", "INCONSISTENCY:")):
-                issues.append({
-                    "severity": "warning",
-                    "check": "contradiction",
-                    "file": "(cross-article)",
-                    "detail": line,
-                })
-
-    return issues
+    if response.strip() == "NO_ISSUES":
+        return []
+    lines = [line.strip() for line in response.splitlines() if line.strip()]
+    if not lines or any(not line.startswith(("CONTRADICTION:", "INCONSISTENCY:")) for line in lines):
+        return [{"severity": "error", "check": "contradiction", "file": "(system)", "detail": "Semantic check returned an invalid or empty response."}]
+    return [{"severity": "warning", "check": "contradiction", "file": "(cross-article)", "detail": line} for line in lines]
 
 
 # =====================================================================
@@ -565,6 +651,8 @@ def _insert_backlink(text: str, source_wikilink: str) -> str:
 
 def fix_missing_backlinks(issues: list[dict]) -> int:
     """Apply auto-fix for symmetric backlinks. Returns count of links added."""
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        return _apply_canonical_fixes(issues)["backlinks_added"]
     by_target: dict[str, list[str]] = {}
     for issue in issues:
         if issue.get("check") != "missing_backlink" or not issue.get("auto_fixable"):
@@ -601,6 +689,8 @@ def fix_index_consistency(issues: list[dict]) -> int:
 
     Returns count of rows appended.
     """
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        return 0
     targets: list[str] = []
     for issue in issues:
         if issue.get("check") != "index_consistency":
@@ -647,11 +737,45 @@ def fix_index_consistency(issues: list[dict]) -> int:
 
 def apply_fixes(all_issues: list[dict]) -> dict:
     """Apply all auto-fixers. Returns counts per fixer."""
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        return _apply_canonical_fixes(all_issues)
     return {
         "backlinks_added": fix_missing_backlinks(all_issues),
         "index_rows_added": fix_index_consistency(all_issues),
         "source_cells_collapsed": fix_index_source_sprawl(all_issues),
     }
+
+
+def _apply_canonical_fixes(issues: list[dict]) -> dict[str, int]:
+    """Commit validated mechanical edits together, then refresh the projection."""
+    store = MemoryStore(KNOWLEDGE_DIR.parent)
+    snapshot = store.snapshot()
+    graph = load_graph(snapshot)
+    articles = graph.articles
+    changed: dict[str, dict] = {}
+    links_added = 0
+    for issue in issues:
+        if issue.get("check") != "missing_backlink" or not issue.get("auto_fixable"):
+            continue
+        source, target = issue.get("source"), issue.get("target")
+        if source not in articles or target not in articles:
+            continue
+        # Recheck the current source after a concurrent compile, rather than
+        # applying relationships that disappeared since the lint snapshot.
+        if target not in graph.links[source]:
+            continue
+        article = changed.get(target, articles[target])
+        body = _insert_backlink(article["body"], source)
+        if body != article["body"]:
+            changed[target] = {**article, "body": body}
+            links_added += 1
+    if changed:
+        store.commit_articles(
+            list(changed.values()), expected_generation=snapshot["generation"],
+            build_entry=f"\n## [{now_iso()}] lint | Mechanical repairs\n- Backlinks added: {links_added}\n",
+        )
+    export_memory(store)
+    return {"backlinks_added": links_added, "index_rows_added": 0, "source_cells_collapsed": 0}
 
 
 # =====================================================================
@@ -695,8 +819,12 @@ def generate_report(all_issues: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _run_structural_checks() -> list[dict]:
-    """Run all structural checks and return the combined issue list."""
+def structural_checks(snapshot: dict | None = None, *, verbose: bool = False) -> list[dict]:
+    """Run a pass against one graph; SQLite errors never select legacy data."""
+    try:
+        graph = load_graph(snapshot)
+    except (sqlite3.Error, ValueError, OSError) as exc:
+        return [{"severity": "error", "check": "database", "file": "(system)", "detail": str(exc)}]
     all_issues: list[dict] = []
     checks = [
         ("Broken links", check_broken_links),
@@ -710,14 +838,21 @@ def _run_structural_checks() -> list[dict]:
         ("Weak connectivity", check_weak_connectivity),
     ]
     for name, check_fn in checks:
-        print(f"  Checking: {name}...")
-        issues = check_fn()
+        if verbose:
+            print(f"  Checking: {name}...")
+        issues = check_fn(graph=graph)
         all_issues.extend(issues)
-        print(f"    Found {len(issues)} issue(s)")
+        if verbose:
+            print(f"    Found {len(issues)} issue(s)")
     return all_issues
 
 
-def main():
+def _run_structural_checks() -> list[dict]:
+    return structural_checks(verbose=True)
+
+
+@guard_legacy_writer(lambda: KNOWLEDGE_DIR.parent)
+def main() -> int:
     parser = argparse.ArgumentParser(description="Lint the knowledge base")
     parser.add_argument(
         "--structural-only",
@@ -737,6 +872,9 @@ def main():
 
     print("Running knowledge base lint checks...")
     all_issues = _run_structural_checks()
+    if any(issue["check"] == "database" for issue in all_issues):
+        print(generate_report(all_issues))
+        return 1
 
     # LLM check (costs money) — skipped under --fix to keep the fix loop fast and free
     if not args.structural_only and not args.fix:
@@ -772,7 +910,10 @@ def main():
     def mutate(state: dict) -> None:
         state["last_lint"] = now_iso()
 
-    update_state(mutate)
+    if MemoryStore.is_initialized(KNOWLEDGE_DIR.parent):
+        MemoryStore(KNOWLEDGE_DIR.parent).update_state("pipeline", mutate)
+    else:
+        update_state(mutate)
 
     # Summary
     errors = sum(1 for i in all_issues if i["severity"] == "error")

@@ -80,6 +80,7 @@ def test_preserve_failed_context_moves_file_to_failed_flush_dir(
 def test_main_preserves_failed_context_without_marking_flushed_or_compiling(
     tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.setattr(flush, "ROOT", tmp_path)
     context_file = tmp_path / "session-flush-session-1.md"
     context_file.write_text("context", encoding="utf-8")
     failed_dir = tmp_path / "failed"

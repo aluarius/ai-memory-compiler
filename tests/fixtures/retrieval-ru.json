@@ -1,0 +1,231 @@
+{
+  "schema_version": 1,
+  "description": "Russian retrieval questions grounded in actual recorded project incidents; paraphrases, not verbatim transcript quotes. Expected paths verified against the 2026-09-05 corpus.",
+  "selection": "The original ten questions and expected paths are retained. Additional questions cover reviewed incidents across domains and are fixed before observing expanded-set retrieval scores.",
+  "cases": [
+    {
+      "query": "Почему регулярное выражение не находит русские слова, хотя на английском работает?",
+      "domain": "text-processing",
+      "source_paths": ["daily/archive/2026-04-22.md"],
+      "expected_paths": ["concepts/js-regex-unicode-cyrillic", "connections/unicode-silent-destruction-patterns"],
+      "evidence": "daily/archive/2026-04-22.md: ai-portal SLOP filters returned zero Cyrillic matches."
+    },
+    {
+      "query": "Как правильно сделать резервную копию SQLite из Docker, чтобы не потерять последние записи?",
+      "domain": "database",
+      "source_paths": ["daily/archive/2026-04-22.md"],
+      "expected_paths": ["concepts/sqlite-wal-docker-backup"],
+      "evidence": "daily/archive/2026-04-22.md: copying bot.db omitted WAL updates."
+    },
+    {
+      "query": "Почему переменные окружения контейнера не меняют адрес API в уже собранном фронтенде Vite?",
+      "domain": "frontend",
+      "source_paths": ["daily/archive/2026-06-18.md", "daily/archive/2026-06-26.md"],
+      "expected_paths": ["concepts/vite-buildtime-env-docker-injection"],
+      "evidence": "daily/archive/2026-06-18.md and 2026-06-26.md: ol-strelec VITE variables were absent from the build environment."
+    },
+    {
+      "query": "Как передать публичный адрес API через runtimeConfig Nuxt и какой префикс нужен переменной?",
+      "domain": "frontend",
+      "source_paths": ["daily/archive/2026-04-15.md"],
+      "expected_paths": ["concepts/nuxt-runtime-config-env-prefix"],
+      "evidence": "Nuxt runtime config incidents compiled from 2026-04-15 and later sessions."
+    },
+    {
+      "query": "Какие метаданные нужны файлу M4B, чтобы iPhone распознал его как аудиокнигу?",
+      "domain": "audio",
+      "source_paths": ["daily/archive/2026-04-10.md"],
+      "expected_paths": ["concepts/ios-audiobook-metadata", "connections/audiobook-generation-and-ios-delivery"],
+      "evidence": "The audiobook delivery pipeline records the iOS media type and metadata requirements."
+    },
+    {
+      "query": "Чем отличаются Stop в Codex и SessionEnd в Claude при сохранении памяти разговора?",
+      "domain": "agent-memory",
+      "source_paths": ["daily/archive/2026-04-21.md", "daily/2026-08-30.md"],
+      "expected_paths": ["connections/codex-vs-claude-code-hook-lifecycle", "concepts/codex-cli-hooks-architecture"],
+      "evidence": "Codex uses per-turn delta checkpoints while Claude SessionEnd remains session scoped."
+    },
+    {
+      "query": "Как безопасно очистить старые сессии Codex, не удалив открытые транскрипты?",
+      "domain": "agent-operations",
+      "source_paths": ["daily/2026-08-12.md", "daily/2026-09-02.md"],
+      "expected_paths": ["concepts/codex-session-runtime-disk-recovery"],
+      "evidence": "2026-08-12 and 2026-09-02 recovery sessions checked descriptors before CLI deletion."
+    },
+    {
+      "query": "Как избежать повторной публикации, если отправка в основной канал прошла, а во второй упала?",
+      "domain": "publishing",
+      "source_paths": ["daily/archive/2026-04-15.md"],
+      "expected_paths": ["concepts/crosspost-partial-failure-ordering"],
+      "evidence": "The recorded publishing pipeline separates prepare, primary, secondary, and posted marking."
+    },
+    {
+      "query": "Почему очистка названия от нелатинских символов опасна перед удалением каталога?",
+      "domain": "filesystem",
+      "source_paths": ["daily/archive/2026-05-01.md"],
+      "expected_paths": ["concepts/slug-normalization-unicode-catastrophe", "connections/unicode-silent-destruction-patterns"],
+      "evidence": "2026-05-01 Cyrillic slug normalization became an empty destructive path."
+    },
+    {
+      "query": "Почему поток SSE обрывается при настройке таймаута HTTP сервера на Go?",
+      "domain": "backend",
+      "source_paths": ["daily/archive/2026-04-16.md"],
+      "expected_paths": ["concepts/go-http-timeout-streaming-proxy"],
+      "evidence": "WriteTimeout is global and TimeoutHandler buffers streaming responses."
+    },
+    {
+      "query": "Как наложить спутниковый снимок на повёрнутый контур в OpenLayers, если его углы образуют трапецию?",
+      "domain": "geospatial",
+      "source_paths": ["daily/archive/2026-05-05.md"],
+      "expected_paths": ["concepts/affine-vs-projective-image-transform"],
+      "evidence": "The ol-map incident traced mirrored footprints to ImageStatic extents and distinguished affine parallelograms from projective quadrilaterals."
+    },
+    {
+      "query": "Android выгрузил приложение во время съёмки: как восстановить выбранное фото и состояние редактора после возврата из камеры?",
+      "domain": "android",
+      "source_paths": ["daily/archive/2026-05-29.md", "daily/archive/2026-06-30.md"],
+      "expected_paths": ["concepts/android-photo-journal-process-death"],
+      "evidence": "The plant tracker photo journal retained camera URI/path and in-flight editor state through SavedStateHandle, with pending prompts stored separately."
+    },
+    {
+      "query": "Быстро выбираю разные товары, а карточка иногда показывает предыдущий товар. Как защититься от запоздавшего ответа запроса?",
+      "domain": "frontend",
+      "source_paths": ["daily/archive/2026-05-06.md"],
+      "expected_paths": ["concepts/async-prop-switch-stale-response"],
+      "evidence": "Ashveil inline item details could be overwritten by the earlier offer request after the selection prop had changed."
+    },
+    {
+      "query": "Почему IFC-здания в Babylon.js полупрозрачны и мерцают при вращении камеры, хотя геометрия уже разбита на части?",
+      "domain": "graphics",
+      "source_paths": ["daily/archive/2026-04-30.md", "daily/archive/2026-05-02.md"],
+      "expected_paths": ["concepts/babylonjs-transparent-sorting-flicker"],
+      "evidence": "The planner viewer used alpha=0.5 by default and on deselection, placing base meshes in the transparent sorting queue."
+    },
+    {
+      "query": "Закрыл порт правилами INPUT, но опубликованный порт Docker всё равно доступен снаружи. Где должна стоять фильтрация?",
+      "domain": "network-security",
+      "source_paths": ["daily/archive/2026-06-02.md", "daily/archive/2026-07-19.md"],
+      "expected_paths": ["concepts/docker-user-chain-firewall"],
+      "evidence": "VPN server audits found externally reachable Docker ports despite INPUT restrictions; the published traffic traversed FORWARD and DOCKER-USER."
+    },
+    {
+      "query": "После смены пароля новые записи зашифрованного дневника исчезают при повторном входе. Какую ошибку нашли в хранении ключа?",
+      "domain": "application-security",
+      "source_paths": ["daily/archive/2026-06-12.md"],
+      "expected_paths": ["concepts/truth-source-encrypted-journal-security"],
+      "evidence": "Truth updated sessionStorage during password rotation but useAuth retained the old encryption key; unreadable new entries were silently filtered."
+    },
+    {
+      "query": "Новостной бот считает разные длинные заголовки дублями из-за двух общих слов. Как учитывать длину заголовка при сравнении?",
+      "domain": "publishing",
+      "source_paths": ["daily/archive/2026-04-15.md"],
+      "expected_paths": ["concepts/jaccard-similarity-dedup"],
+      "evidence": "AI Radar replaced a fixed shared-word threshold with set intersection divided by union to reduce false duplicates on long titles."
+    },
+    {
+      "query": "В Nuxt флаг OpenTelemetry задан как true, плагин запускается, но отправка спанов не включается. Почему проверка на строку может не сработать?",
+      "domain": "observability",
+      "source_paths": ["daily/archive/2026-05-13.md"],
+      "expected_paths": ["concepts/destr-env-type-coercion"],
+      "evidence": "The rc-shop OTel plugin compared runtimeConfig to the string true after destr had parsed the environment value into a boolean."
+    },
+    {
+      "query": "Можно ли освободить pg_advisory_xact_lock внутри транзакции и заново захватить блокировки игроков по порядку ID?",
+      "domain": "database",
+      "source_paths": ["daily/archive/2026-05-24.md"],
+      "expected_paths": ["concepts/advisory-lock-transaction-scope-constraint"],
+      "evidence": "The cross-user item-use design depended on releasing a transaction-scoped actor lock before sorted reacquisition, which the lock lifecycle does not permit."
+    },
+    {
+      "query": "После импорта данных с явными ID новые покупки иногда падают с duplicate key. Почему последовательность выдаёт уже занятые номера?",
+      "domain": "database",
+      "source_paths": ["daily/archive/2026-04-26.md", "daily/archive/2026-05-23.md"],
+      "expected_paths": ["concepts/postgres-sequence-drift-recovery"],
+      "evidence": "Ashveil imports and migration squashes inserted explicit IDs without advancing sequences; the recorded item allocator lagged behind MAX(id)."
+    },
+    {
+      "query": "Почему переключатель Vue без v-model всегда получает false и игнорирует внутренний defaultValue?",
+      "domain": "frontend",
+      "source_paths": ["daily/archive/2026-06-04.md"],
+      "expected_paths": ["concepts/vue-boolean-prop-default-pitfall"],
+      "evidence": "A headless Switch could not distinguish an absent Boolean modelValue from explicit false until its default was made undefined."
+    },
+    {
+      "query": "В пользовательской директиве Vue watch за binding с deep=true не замечает новое значение. Каким хуком обновлять DOM?",
+      "domain": "frontend",
+      "source_paths": ["daily/archive/2026-07-09.md"],
+      "expected_paths": ["concepts/vue-directive-hook-reactivity"],
+      "evidence": "The context-frontend review found a watcher over the directive binding snapshot and directed rerendering through the updated lifecycle hook."
+    },
+    {
+      "query": "После расширения RouteMeta через declare module vue-router получил TS2300 Duplicate identifier. Почему type здесь не подходит?",
+      "domain": "typescript",
+      "source_paths": ["daily/archive/2026-05-12.md"],
+      "expected_paths": ["concepts/vue-router-module-augmentation-pitfall"],
+      "evidence": "Ashveil route metadata augmentation used a type alias where interface declaration merging was required."
+    },
+    {
+      "query": "GitLab CI не может скачать приватную Git-зависимость после перехода с SSH на HTTPS. Что проверить кроме доступности порта?",
+      "domain": "ci",
+      "source_paths": ["daily/2026-09-02.md", "daily/2026-09-03.md"],
+      "expected_paths": ["concepts/ui-kit-public-contract-and-ci-transport-review"],
+      "evidence": "The ui-kit-sn repair needed both a short-lived CI_JOB_TOKEN URL rewrite and the dependency project's job-token allowlist."
+    },
+    {
+      "query": "В WiFi Navigator токен сохранился в Pinia, но API возвращает 401 с Authorization Bearer. Какой заголовок требует этот сервер?",
+      "domain": "api-integration",
+      "source_paths": ["daily/archive/2026-07-29.md"],
+      "expected_paths": ["concepts/wifinavigator-api-session-polling-contract"],
+      "evidence": "The reviewed live API required the Token header, while replacing it with a generic Bearer scheme broke protected requests."
+    },
+    {
+      "query": "После переустановки сервера Xray TCP соединяется, затем приходит FIN без ответа, а журнал Reality пуст. Что оказалось причиной такого EOF?",
+      "domain": "networking",
+      "source_paths": ["daily/archive/2026-06-25.md"],
+      "expected_paths": ["concepts/xray-reality-relay-silent-rejection"],
+      "evidence": "The paired vpt-xray and vpt-gateway incident isolated a camouflage-destination TLS failure after plain TCP+Reality reproduced the same silent rejection."
+    },
+    {
+      "query": "В Tonks добавляю продажу задним числом, и средняя цена позиции становится неправильной. Почему пересчёта только новой операции недостаточно?",
+      "domain": "financial-software",
+      "source_paths": ["daily/archive/2026-05-15.md"],
+      "expected_paths": ["concepts/tonks-financial-integrity-patterns"],
+      "evidence": "The portfolio audit replaced insertion-order incremental holdings updates with chronological transaction replay for backdated trades."
+    },
+    {
+      "query": "В диалоге герой отвечает «именно поэтому», но вывод не следует из предыдущей реплики. Как мы исправляли такую мотивацию в АИОН?",
+      "domain": "fiction",
+      "source_paths": ["daily/archive/2026-07-09.md"],
+      "expected_paths": ["concepts/fiction-motivation-causal-justification"],
+      "evidence": "The AION line edit grounded terse causal replies in the actual inference and concrete consequence rather than an unearned therefore."
+    },
+    {
+      "query": "Разные герои романа говорят одинаковыми короткими афоризмами, а каждый абзац заканчивается эффектной фразой. Какие повторы мы убирали?",
+      "domain": "fiction",
+      "source_paths": ["daily/archive/2026-04-28.md", "daily/archive/2026-05-01.md"],
+      "expected_paths": ["concepts/ai-prose-style-markers"],
+      "evidence": "The AION editorial review identified uniform character voices, frequent aphoristic closers, triplets, and paired opposites as recurring structural tics."
+    },
+    {
+      "query": "Как сформулировать услугу автоматизации на Kwork, чтобы клиент покупал проверяемый результат, а не обещание сделать что угодно с ИИ?",
+      "domain": "business",
+      "source_paths": ["daily/archive/2026-08-03.md", "daily/archive/2026-08-04.md"],
+      "expected_paths": ["concepts/ai-orchestrated-kwork-service-strategy"],
+      "evidence": "The eight-offer launch storefront separated business outcomes, measurable scope, exclusions, acceptance criteria, and revision boundaries."
+    },
+    {
+      "query": "Зачем третьей игре после BK2 и Era Frontier короткая одиночная смена вместо ещё одной MMO и что проверить до расширения?",
+      "domain": "product-design",
+      "source_paths": ["daily/2026-09-04.md"],
+      "expected_paths": ["connections/game-portfolio-differentiation-and-validation"],
+      "evidence": "The third-game concept decision used a distinct adult-casual loop and staged retention evidence before social expansion or common-engine extraction."
+    },
+    {
+      "query": "Можно ли судить о незаметности туннеля по сравнению shaped-трассы с loopback и прямой трассы с физического WAN интерфейса?",
+      "domain": "measurement",
+      "source_paths": ["daily/archive/2026-07-20.md", "daily/archive/2026-07-21.md"],
+      "expected_paths": ["concepts/vpt-traffic-shaping-capture"],
+      "evidence": "The paired-capture audit traced large distance to mixed interfaces and packetization, requiring matched physical-WAN workloads and an independent holdout."
+    }
+  ]
+}

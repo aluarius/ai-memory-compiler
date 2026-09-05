@@ -10,6 +10,7 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     knowledge_dir = tmp_path / "knowledge"
     concepts = knowledge_dir / "concepts"
     concepts.mkdir(parents=True)
+    monkeypatch.setattr(mcp_server, "ROOT_DIR", tmp_path)
     monkeypatch.setattr(mcp_server, "KNOWLEDGE_DIR", knowledge_dir)
     monkeypatch.setattr(mcp_server, "ARTICLE_DIRS", [concepts])
     monkeypatch.setattr(mcp_server, "USAGE_FILE", tmp_path / "usage.json")
@@ -104,3 +105,15 @@ def test_search_fts_empty_reports_no_match(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(mcp_server.kb_db, "search", lambda query, limit=10: [])
 
     assert "No articles matching" in mcp_server.search_knowledge("zzz")
+
+
+def test_search_daily_logs_includes_archive(tmp_path, monkeypatch):
+    archive = tmp_path / "daily" / "archive"
+    archive.mkdir(parents=True)
+    (archive / "2026-04-01.md").write_text(
+        "# Daily\n### Session\nСекрет восстановления: sqlite backup.\n", encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "DAILY_DIR", archive.parent)
+    monkeypatch.setattr(mcp_server, "ROOT_DIR", tmp_path)
+    result = mcp_server.search_daily_logs("восстановления", last_n_days=0)
+    assert "2026-04-01.md" in result
+    assert "sqlite backup" in result

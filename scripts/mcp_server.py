@@ -44,6 +44,10 @@ def _record_article_read(rel_path: str) -> None:
     Telemetry must never break the tool — any failure is swallowed.
     """
     try:
+        if kb_db.canonical_store(ROOT_DIR) is not None:
+            from memory_store import MemoryStore
+            MemoryStore(ROOT_DIR).record_read(rel_path)
+            return
         with file_lock(USAGE_LOCK):
             data: dict = {}
             if USAGE_FILE.exists():
@@ -71,37 +75,53 @@ def _list_articles() -> list[Path]:
 
 
 @mcp.tool()
-def list_articles() -> str:
+def list_articles(project: str | None = None) -> str:
     """List all knowledge base articles with summaries from the index."""
+    if kb_db.canonical_store(ROOT_DIR) is not None:
+        rows = kb_db.article_records(ROOT_DIR, project)
+        return ("# Knowledge Base Index (canonical SQLite)\n\n"
+                "| Article | Summary | Updated |\n|---|---|---|\n" + "\n".join(
+                    f"| [[{a['path']}]] | {a['summary']} | {a['updated']} |" for a in rows))
     if INDEX_FILE.exists():
         return INDEX_FILE.read_text(encoding="utf-8")
     return "Knowledge base is empty — no articles compiled yet."
 
 
 @mcp.tool()
-def search_knowledge(query: str) -> str:
-    """Search knowledge base articles by keyword. Returns matching excerpts with article paths."""
-    try:
+def search_knowledge(query: str, project: str | None = None, mode: str = "hybrid") -> str:
+    """Search article text with optional project filtering and local semantic ranks."""
+    if mode not in {"bm25", "hybrid"}:
+        return "Invalid mode: use bm25 or hybrid."
+    canonical = kb_db.canonical_store(ROOT_DIR) is not None
+    backend = "bm25"
+    if canonical or project is not None:
+        results = kb_db.search(query, limit=10, project=project, root=ROOT_DIR)
+    else:
         results = kb_db.search(query, limit=10)
-    except Exception:
-        results = None
+    if mode == "hybrid":
+        from semantic_search import SemanticUnavailable, hybrid_search
+        try:
+            results = hybrid_search(query, kb_db.article_records(ROOT_DIR, project), root=ROOT_DIR, limit=10)
+            backend = "hybrid:bm25+multilingual-e5-small"
+        except SemanticUnavailable as exc:
+            backend = f"bm25 (semantic unavailable: {exc})"
     if results is None:
         # index missing/broken -> degrade to the linear scan
-        return _legacy_search(query)
+        return f"Backend: legacy-scan; {backend}\n\n" + _legacy_search(query)
     if not results:
-        return f"No articles matching '{query}'. Use list_articles() to see what's available."
+        return f"Backend: {backend}\nNo articles matching '{query}'. Use list_articles() to see what's available."
     blocks = [
         f"### [[{r['path']}]] — {r['title']}\n"
         f"_{r['summary']}_ (updated {r['updated']})\n> {r['snippet']}"
         for r in results
     ]
-    return f"Found {len(results)} matching articles:\n\n" + "\n\n".join(blocks)
+    return f"Backend: {backend}\nFound {len(results)} matching articles:\n\n" + "\n\n".join(blocks)
 
 
 def _legacy_search(query: str) -> str:
     query_lower = query.lower()
     keywords = query_lower.split()
-    results: list[str] = []
+    results: list[tuple[int, str]] = []
 
     for article in _list_articles():
         content = article.read_text(encoding="utf-8")
@@ -158,6 +178,18 @@ def read_article(path: str) -> str:
     if article is None:
         return f"Invalid article path: {path}"
 
+    store = kb_db.canonical_store(ROOT_DIR)
+    if store is not None:
+        record = store.read_article(path.removesuffix(".md"))
+        if record is None:
+            slug = Path(path).stem
+            candidates = [a for a in store.list_articles() if slug in Path(a["path"]).name]
+            if len(candidates) != 1:
+                return f"Article not found: {path}. Use list_articles() to see available articles."
+            record = candidates[0]
+        _record_article_read(record["path"])
+        return record["body"]
+
     if not article.exists():
         # Try fuzzy match
         slug = Path(path).stem
@@ -176,12 +208,38 @@ def read_article(path: str) -> str:
 
 
 @mcp.tool()
-def search_daily_logs(query: str, last_n_days: int = 7) -> str:
-    """Search recent daily conversation logs by keyword. Useful for finding context from recent sessions."""
-    if not DAILY_DIR.exists():
-        return "No daily logs found."
+def read_source(path: str) -> str:
+    """Read exact source provenance, including daily/archive paths, from canonical storage."""
+    normalized = path.replace("\\", "/")
+    if not normalized.startswith("daily/") or ".." in Path(normalized).parts:
+        return f"Invalid source path: {path}"
+    store = kb_db.canonical_store(ROOT_DIR)
+    if store is not None:
+        content = store.read_source(normalized)
+    else:
+        source = safe_join(DAILY_DIR, normalized.removeprefix("daily/"))
+        content = source.read_text(encoding="utf-8") if source and source.is_file() else None
+    return content if content is not None else f"Source not found: {path}"
 
-    logs = sorted(DAILY_DIR.glob("*.md"), reverse=True)[:last_n_days]
+
+@mcp.tool()
+def search_daily_logs(query: str, last_n_days: int = 7, include_archive: bool = True) -> str:
+    """Search daily logs including archives; last_n_days=0 searches all stored dates."""
+    if last_n_days < 0:
+        return "last_n_days must be nonnegative; use 0 for all dates."
+    store = kb_db.canonical_store(ROOT_DIR)
+    if store is not None:
+        logs = store.list_sources(include_archive=include_archive)
+    else:
+        paths = list(DAILY_DIR.glob("*.md"))
+        if include_archive:
+            paths.extend((DAILY_DIR / "archive").rglob("*.md"))
+        logs = [{"path": "daily/" + p.relative_to(DAILY_DIR).as_posix(),
+                 "content": p.read_text(encoding="utf-8")} for p in paths]
+    logs.sort(key=lambda row: (Path(row["path"]).name, row["path"]), reverse=True)
+    if last_n_days:
+        dates = sorted({Path(row["path"]).stem for row in logs}, reverse=True)[:last_n_days]
+        logs = [row for row in logs if Path(row["path"]).stem in dates]
     if not logs:
         return "No daily logs found."
 
@@ -190,7 +248,7 @@ def search_daily_logs(query: str, last_n_days: int = 7) -> str:
     results: list[str] = []
 
     for log in logs:
-        content = log.read_text(encoding="utf-8")
+        content = log["content"]
         content_lower = content.lower()
 
         if not any(kw in content_lower for kw in keywords):
@@ -207,7 +265,7 @@ def search_daily_logs(query: str, last_n_days: int = 7) -> str:
                 matching_sections.append("### " + section.strip())
 
         if matching_sections:
-            results.append(f"## {log.name}\n\n" + "\n\n".join(matching_sections[:3]))
+            results.append(f"## [[{log['path']}]]\n\n" + "\n\n".join(matching_sections[:3]))
 
     if not results:
         return f"No daily logs matching '{query}' in the last {last_n_days} days."

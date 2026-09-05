@@ -3,9 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import kb_db
+import pytest
 
 
 HEADER = "# Index\n\n| Article | Summary | Compiled From | Updated |\n|---|---|---|---|\n"
+
+
+@pytest.fixture(autouse=True)
+def isolated_root(tmp_path, monkeypatch):
+    monkeypatch.setattr(kb_db, "KNOWLEDGE_DIR", tmp_path / "knowledge")
 
 
 def _setup_kb(monkeypatch, tmp_path: Path) -> Path:

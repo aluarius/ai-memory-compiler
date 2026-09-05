@@ -31,7 +31,8 @@ if str(ROOT / "scripts") not in sys.path:
 SCRIPTS_DIR = ROOT / "scripts"
 STATE_DIR = SCRIPTS_DIR
 
-from session_utils import extract_conversation_context
+from session_utils import extract_conversation_context  # noqa: E402 - scripts path is configured above.
+from capture_spool import guard_capture_hook  # noqa: E402
 
 logging.basicConfig(
     filename=str(SCRIPTS_DIR / "flush.log"),
@@ -45,6 +46,7 @@ MAX_CONTEXT_CHARS = 15_000
 MIN_TURNS_TO_FLUSH = 5
 
 
+@guard_capture_hook(lambda: ROOT, agent="claude_code", source="pre-compact")
 def main() -> None:
     # Read hook input from stdin
     try:
@@ -71,6 +73,17 @@ def main() -> None:
     transcript_path = Path(transcript_path_str)
     if not transcript_path.exists():
         logging.info("SKIP: transcript missing: %s", transcript_path_str)
+        return
+
+    from memory_store import MemoryStore
+    if MemoryStore.is_initialized(ROOT):
+        from capture_service import capture_transcript, spawn_worker
+        store = MemoryStore(ROOT)
+        ids = capture_transcript(store, transcript_path, {
+            "session_id": session_id, "agent": "claude_code", "provider": "anthropic",
+            "cwd": hook_input.get("cwd", ""), "source": "pre-compact",
+        })
+        spawn_worker(store, ids)
         return
 
     # Extract conversation context in the hook
@@ -138,4 +151,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

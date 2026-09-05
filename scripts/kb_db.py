@@ -1,15 +1,9 @@
-"""SQLite + FTS5 sidecar index over the markdown knowledge base.
+"""FTS5 retrieval over canonical article snapshots, with legacy read compatibility.
 
-Markdown stays the source of truth; this database is derived and disposable —
-rebuilt after every compile and in nightly maintenance. It exists because the
-two hottest read paths outgrew flat files: MCP search was a linear scan of
-400+ articles with naive keyword counting, and the compile prompt carried the
-entire 111KB index (~33k tokens) on every run. FTS5/BM25 solves both: ranked
-search with snippets, and a small relevance-selected index slice for compile.
-
-Failure contract: every consumer falls back to the flat-file behavior when
-the DB is missing or broken — a bad index can slow things down, never break
-them.
+After migration MemoryStore owns all content. In-memory FTS snapshots remain
+disposable and refresh when article content or metadata changes. An unmigrated
+knowledge base may still use its old sidecar or Markdown files. Canonical store
+errors never redirect reads to potentially stale exports.
 
 Usage:
     uv run python scripts/kb_db.py rebuild
@@ -19,13 +13,19 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from config import INDEX_FILE, KNOWLEDGE_DIR, SCRIPTS_DIR
 from utils import INDEX_ROW_RE, list_wiki_articles
+
+if TYPE_CHECKING:
+    from memory_store import MemoryStore
 
 DB_FILE = SCRIPTS_DIR / "kb-index.sqlite"
 
@@ -44,29 +44,121 @@ MAX_HUBS = 15
 CANDIDATE_TERMS = 30
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=5.0)
-    conn.execute("PRAGMA journal_mode=WAL")
+def canonical_store(root: Path | None = None) -> MemoryStore | None:
+    """Return the canonical reader; only an unmigrated KB uses legacy files."""
+    from memory_store import MemoryStore, is_initialized
+    root = Path(root) if root is not None else KNOWLEDGE_DIR.parent
+    if is_initialized(root):
+        return MemoryStore(root, readonly=True)
+    if (root / "scripts" / "memory.sqlite").exists():
+        raise RuntimeError("Canonical memory database is not ready or is corrupt; Markdown fallback is disabled")
+    return None
+
+
+def matches_project(article: dict, project: str) -> bool:
+    """Match a project slug or a cwd inside an explicitly associated root."""
+    requested = Path(project).expanduser()
+    for value in article.get("projects", []):
+        associated = Path(value).expanduser()
+        if value == project or associated.name == requested.name:
+            return True
+        if associated.is_absolute() and requested.is_absolute() and requested.is_relative_to(associated):
+            return True
+        if not associated.is_absolute() and value in requested.parts:
+            return True
+    return False
+
+
+def article_records(root: Path | None = None, project: str | None = None) -> list[dict]:
+    """Read canonical records, or labelled legacy compatibility before migration."""
+    store = canonical_store(root)
+    if store is not None:
+        records = store.list_articles()
+    else:
+        knowledge = Path(root) / "knowledge" if root is not None else KNOWLEDGE_DIR
+        index = knowledge / "index.md"
+        metadata = {}
+        if index.exists():
+            for line in index.read_text(encoding="utf-8").splitlines():
+                match = INDEX_ROW_RE.match(line.strip())
+                if match:
+                    path, summary, sources, updated = match.groups()
+                    metadata[path] = (summary, sources, updated)
+        records = []
+        paths = (list_wiki_articles() if root is None else
+                 [path for directory in ("concepts", "connections", "qa")
+                  for path in sorted((knowledge / directory).glob("*.md"))])
+        for path in paths:
+            body = path.read_text(encoding="utf-8")
+            rel = path.relative_to(knowledge).as_posix().removesuffix(".md")
+            title = _TITLE_RE.search(body)
+            summary, sources, updated = metadata.get(rel, ("", "", ""))
+            records.append({"path": rel, "title": title.group(1) if title else rel,
+                            "summary": summary, "body": body, "updated": updated,
+                            "sources": [s.strip() for s in sources.split(",") if s.strip()],
+                            "projects": [], "content_hash": hashlib.sha256(body.encode()).hexdigest(),
+                            "revision": 0})
+    return [a for a in records if matches_project(a, project)] if project else records
+
+
+def _populate(conn: sqlite3.Connection, records: list[dict]) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS articles (path TEXT PRIMARY KEY, title TEXT NOT NULL,"
+                 " summary TEXT NOT NULL, updated TEXT NOT NULL, source_count INTEGER NOT NULL)")
+    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5("
+                 "title, summary, body, path UNINDEXED, tokenize='unicode61')")
+    with conn:
+        conn.execute("DELETE FROM articles")
+        conn.execute("DELETE FROM articles_fts")
+        conn.executemany("INSERT INTO articles VALUES (?, ?, ?, ?, ?)",
+                         [(a["path"], a["title"], a["summary"], a["updated"], len(a["sources"]))
+                          for a in records])
+        conn.executemany("INSERT INTO articles_fts VALUES (?, ?, ?, ?)",
+                         [(a["title"], a["summary"], a["body"], a["path"]) for a in records])
+
+
+_snapshot = threading.local()
+
+
+def search_records(query: str, records: list[dict], limit: int = 10) -> list[dict]:
+    """Search a canonical snapshot without disk writes or export dependencies."""
+    fts_query = _fts_query(query)
+    if not fts_query or limit <= 0:
+        return []
+    fingerprint = tuple((a["path"], a["content_hash"], a["summary"], a["updated"]) for a in records)
+    if getattr(_snapshot, "fingerprint", None) != fingerprint:
+        previous = getattr(_snapshot, "conn", None)
+        if previous is not None:
+            previous.close()
+        conn = sqlite3.connect(":memory:")
+        _populate(conn, records)
+        _snapshot.conn = conn
+        _snapshot.fingerprint = fingerprint
+    rows = _snapshot.conn.execute(
+        "SELECT f.path, snippet(articles_fts, 2, '«', '»', '…', 12)"
+        " FROM articles_fts f WHERE articles_fts MATCH ?"
+        f" ORDER BY bm25(articles_fts, {_BM25_WEIGHTS}), f.path LIMIT ?", (fts_query, limit)).fetchall()
+    by_path = {a["path"]: a for a in records}
+    return [{**by_path[path], "snippet": snippet} for path, snippet in rows]
+
+
+def _connect(db_path: Path, *, readonly: bool = False) -> sqlite3.Connection:
+    if readonly:
+        conn = sqlite3.connect(Path(db_path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5.0)
+    else:
+        conn = sqlite3.connect(db_path, timeout=5.0)
+    if not readonly:
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
-def _index_rows() -> dict[str, dict]:
-    """index.md rows keyed by target: {summary, sources, updated, source_count}."""
-    rows: dict[str, dict] = {}
-    if not INDEX_FILE.exists():
-        return rows
-    for line in INDEX_FILE.read_text(encoding="utf-8").splitlines():
-        m = INDEX_ROW_RE.match(line.strip())
-        if not m:
-            continue
-        target, summary, sources, updated = m.groups()
-        rows[target] = {
-            "summary": summary,
-            "updated": updated,
-            "source_count": sources.count(",") + 1 if sources.strip() else 0,
-        }
-    return rows
+def _read_index(db_path: Path) -> sqlite3.Connection | None:
+    store = canonical_store()
+    if store is not None:
+        conn = sqlite3.connect(":memory:")
+        _populate(conn, store.list_articles())
+        return conn
+    return _connect(db_path, readonly=True) if Path(db_path).exists() else None
 
 
 def rebuild_index(db_path: Path | None = None) -> int:
@@ -76,50 +168,11 @@ def rebuild_index(db_path: Path | None = None) -> int:
     missing table; WAL keeps readers unblocked during the write.
     """
     db_path = db_path or DB_FILE
-    index_rows = _index_rows()
+    records = article_records()
     conn = _connect(db_path)
     try:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS articles ("
-            " path TEXT PRIMARY KEY, title TEXT NOT NULL,"
-            " summary TEXT NOT NULL DEFAULT '', updated TEXT NOT NULL DEFAULT '',"
-            " source_count INTEGER NOT NULL DEFAULT 0)"
-        )
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5("
-            " title, summary, body, path UNINDEXED, tokenize='unicode61')"
-        )
-        count = 0
-        with conn:
-            conn.execute("DELETE FROM articles")
-            conn.execute("DELETE FROM articles_fts")
-            for article in list_wiki_articles():
-                rel = (
-                    str(article.relative_to(KNOWLEDGE_DIR))
-                    .removesuffix(".md")
-                    .replace("\\", "/")
-                )
-                body = article.read_text(encoding="utf-8")
-                title_match = _TITLE_RE.search(body)
-                title = title_match.group(1) if title_match else rel
-                meta = index_rows.get(rel, {})
-                conn.execute(
-                    "INSERT INTO articles VALUES (?, ?, ?, ?, ?)",
-                    (
-                        rel,
-                        title,
-                        meta.get("summary", ""),
-                        meta.get("updated", ""),
-                        meta.get("source_count", 0),
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO articles_fts (title, summary, body, path)"
-                    " VALUES (?, ?, ?, ?)",
-                    (title, meta.get("summary", ""), body, rel),
-                )
-                count += 1
-        return count
+        _populate(conn, records)
+        return len(records)
     finally:
         conn.close()
 
@@ -144,9 +197,12 @@ def _fts_query(text: str, max_terms: int | None = None) -> str | None:
 
 
 def search(
-    query: str, limit: int = 10, db_path: Path | None = None
+    query: str, limit: int = 10, db_path: Path | None = None, *,
+    project: str | None = None, root: Path | None = None,
 ) -> list[dict] | None:
     """BM25-ranked search. None = DB unusable (caller falls back), [] = no hits."""
+    if canonical_store(root) is not None or root is not None or project is not None:
+        return search_records(query, article_records(root, project), limit)
     db_path = db_path or DB_FILE
     if not Path(db_path).exists():
         return None
@@ -154,7 +210,7 @@ def search(
     if fts_query is None:
         return []
     try:
-        conn = _connect(db_path)
+        conn = _connect(db_path, readonly=True)
         try:
             rows = conn.execute(
                 "SELECT f.path, a.title, a.summary, a.updated,"
@@ -213,10 +269,10 @@ def find_similar_pairs(
     merge). None when the index is unusable.
     """
     db_path = db_path or DB_FILE
-    if not Path(db_path).exists():
-        return None
     try:
-        conn = _connect(db_path)
+        conn = _read_index(db_path)
+        if conn is None:
+            return None
         try:
             rows = conn.execute("SELECT path, title, summary FROM articles").fetchall()
             # path -> {neighbour: bm25 relevance (higher = closer)}
@@ -262,7 +318,13 @@ def find_similar_pairs(
 
 def _pair_is_linked(a: str, b: str) -> bool:
     """True if either article wikilinks the other."""
+    store = canonical_store()
     for src, dst in ((a, b), (b, a)):
+        if store is not None:
+            article = store.read_article(src)
+            if article and f"[[{dst}]]" in article["body"]:
+                return True
+            continue
         path = KNOWLEDGE_DIR / f"{src}.md"
         if path.exists() and f"[[{dst}]]" in path.read_text(encoding="utf-8"):
             return True
@@ -284,11 +346,12 @@ def compile_index_slice(
     content, and the biggest hub rows by compiled-source count.
     """
     db_path = db_path or DB_FILE
-    if not Path(db_path).exists():
-        return None
     try:
-        conn = _connect(db_path)
+        conn = _read_index(db_path)
+        if conn is None:
+            return None
         try:
+            total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
             cutoff = (
                 datetime.fromisoformat(_today()) - timedelta(days=recent_days)
             ).strftime("%Y-%m-%d")
@@ -328,7 +391,6 @@ def compile_index_slice(
         seen.add(path)
         lines.append(f"| [[{path}]] | {summary} | {updated} |")
 
-    total = len(_index_rows())
     return (
         f"RELEVANT SLICE of the index ({len(seen)} of {total} articles): recently"
         " updated, matched against this daily log, and major hubs. The FULL index"

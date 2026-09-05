@@ -25,11 +25,14 @@ Configure in .claude/settings.json:
 import json
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Paths relative to project root
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import kb_db
 KNOWLEDGE_DIR = ROOT / "knowledge"
 DAILY_DIR = ROOT / "daily"
 INDEX_FILE = KNOWLEDGE_DIR / "index.md"
@@ -44,6 +47,8 @@ MIN_HUB_READS = 2
 # 19.4-19.5KB payloads across multiple sessions. Stay under that threshold —
 # an inline 9.5KB beats a persisted 20KB.
 MAX_CONTEXT_CHARS = 9_500
+MAX_CONTEXT_BYTES = 9_500
+MAX_LOG_BYTES = 2_000
 MAX_LOG_LINES = 30
 RECENT_DAYS = 14
 MAX_HUB_ROWS = 15
@@ -62,11 +67,14 @@ def get_recent_log() -> str:
     """Read the most recent daily log (today or yesterday)."""
     today = datetime.now(timezone.utc).astimezone()
 
+    store = kb_db.canonical_store(ROOT)
     for offset in range(2):
         date = today - timedelta(days=offset)
         log_path = DAILY_DIR / f"{date.strftime('%Y-%m-%d')}.md"
-        if log_path.exists():
-            lines = log_path.read_text(encoding="utf-8").splitlines()
+        content = (store.read_source(f"daily/{log_path.name}") if store is not None
+                   else log_path.read_text(encoding="utf-8") if log_path.exists() else None)
+        if content is not None:
+            lines = content.splitlines()
             # Return last N lines to keep context small
             recent = lines[-MAX_LOG_LINES:] if len(lines) > MAX_LOG_LINES else lines
             return "\n".join(recent)
@@ -76,6 +84,9 @@ def get_recent_log() -> str:
 
 def load_usage_counts() -> dict:
     """Article read counters written by the MCP server; {} when absent/corrupt."""
+    store = kb_db.canonical_store(ROOT)
+    if store is not None:
+        return store.usage_counts()
     try:
         data = json.loads(USAGE_FILE.read_text(encoding="utf-8"))
         reads = data.get("article_reads", {})
@@ -134,8 +145,8 @@ def select_tier_rows(
     def reads(row: dict) -> int:
         return usage.get(row["link"].strip("[]"), 0)
 
-    recent = [r for r in rows if r["updated"] >= cutoff]
-    recent.sort(key=lambda r: r["updated"], reverse=True)
+    recent = [r for r in rows if r["updated"] >= cutoff or r.get("project_match")]
+    recent.sort(key=lambda r: (bool(r.get("project_match")), r["updated"]), reverse=True)
     recent_links = {r["link"] for r in recent}
 
     remaining = [r for r in rows if r["link"] not in recent_links]
@@ -149,47 +160,37 @@ def select_tier_rows(
 
 
 def _format_row(row: dict) -> str:
-    return f"| {row['link']} | {row['summary']} | {row['updated']} |"
+    summary = " ".join(row["summary"].splitlines()).replace("|", "\\|")
+    return f"| {row['link']} | {summary} | {row['updated']} |"
 
 
 def build_kb_section(
     rows: list[dict], now: datetime, budget: int, usage: dict | None = None
 ) -> str:
-    """Build the tiered KB section within a character budget.
-
-    Priority: recent rows (newest first), then hub rows. Rows that don't
-    fit are dropped whole — never truncated mid-row.
-    """
+    """Build complete rows within a UTF-8 budget, reserving space for hubs."""
     total = len(rows)
     recent, hubs = select_tier_rows(rows, now, usage=usage)
 
     header = (
         f"## Knowledge Base (tiered view: {total} articles total)\n\n"
-        "Recently updated + long-lived hub articles below. The FULL index is at\n"
-        f"`{INDEX_FILE}` — grep it (or the `knowledge-base` MCP tools: "
-        "search_knowledge, read_article, list_articles) for anything not shown here.\n\n"
+        "Project matches, recent articles, and long-lived hubs below. Use the "
+        "`knowledge-base` MCP tools search_knowledge, read_article, list_articles "
+        "for complete canonical knowledge. An optional Markdown export is at "
+        f"`{INDEX_FILE}`.\n\n"
         "| Article | Summary | Updated |\n|---|---|---|\n"
     )
     hub_header = "\n**Hub articles (most-compiled long-lived topics):**\n\n| Article | Summary | Updated |\n|---|---|---|\n"
 
-    used = len(header)
-    recent_lines: list[str] = []
-    for row in recent:
-        line = _format_row(row) + "\n"
-        if used + len(line) > budget:
-            break
-        recent_lines.append(line)
-        used += len(line)
-
-    hub_lines: list[str] = []
-    if hubs and used + len(hub_header) < budget:
-        used += len(hub_header)
-        for row in hubs:
-            line = _format_row(row) + "\n"
-            if used + len(line) > budget:
-                break
-            hub_lines.append(line)
-            used += len(line)
+    if _bytes(header) > budget:
+        return ""
+    available = budget - _bytes(header)
+    hub_lines = []
+    if hubs:
+        first_hub_size = _bytes(hub_header + _format_row(hubs[0]) + "\n")
+        reserve = min(available, max(available // 3, first_hub_size))
+        hub_lines = _fit_rows(hubs, reserve - _bytes(hub_header))
+    reserved = _bytes(hub_header + "".join(hub_lines)) if hub_lines else 0
+    recent_lines = _fit_rows(recent, available - reserved)
 
     section = header + "".join(recent_lines)
     if hub_lines:
@@ -197,20 +198,48 @@ def build_kb_section(
     return section
 
 
-def build_context() -> str:
+def _bytes(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _fit_rows(rows: list[dict], budget: int) -> list[str]:
+    lines = []
+    for row in rows:
+        line = _format_row(row) + "\n"
+        size = _bytes(line)
+        if size <= budget:
+            lines.append(line)
+            budget -= size
+    return lines
+
+
+def _project_rows(cwd: str | None) -> list[dict]:
+    store = kb_db.canonical_store(ROOT)
+    if store is None:
+        return parse_index_rows(INDEX_FILE.read_text(encoding="utf-8")) if INDEX_FILE.exists() else []
+    articles = store.list_articles()
+    if cwd:
+        articles = [a for a in articles if not a["projects"] or kb_db.matches_project(a, cwd)]
+    return [{"link": f"[[{a['path']}]]", "summary": a["summary"],
+             "sources": ", ".join(a["sources"]), "updated": a["updated"],
+             "source_count": len(a["sources"]),
+             "project_match": bool(cwd and kb_db.matches_project(a, cwd))} for a in articles]
+
+
+def build_context(cwd: str | None = None) -> str:
     """Assemble the context to inject into the conversation."""
     now = datetime.now(timezone.utc).astimezone()
     parts = [f"## Today\n{now.strftime('%A, %B %d, %Y')}"]
 
     # Recent daily log FIRST — it must always survive the budget.
-    recent_log = get_recent_log()
+    recent_log = get_recent_log().encode("utf-8")[-MAX_LOG_BYTES:].decode("utf-8", errors="ignore")
     parts.append(f"## Recent Daily Log\n\n{recent_log}")
 
     # Tiered knowledge base view in whatever budget remains.
-    if INDEX_FILE.exists():
+    rows = _project_rows(cwd)
+    if rows:
         fixed = "\n\n---\n\n".join(parts)
-        budget = MAX_CONTEXT_CHARS - len(fixed) - 16  # separator slack
-        rows = parse_index_rows(INDEX_FILE.read_text(encoding="utf-8"))
+        budget = MAX_CONTEXT_BYTES - _bytes(fixed) - 7
         if rows and budget > 500:
             parts.append(build_kb_section(rows, now, budget, load_usage_counts()))
         elif budget > 100:
@@ -223,17 +252,18 @@ def build_context() -> str:
 
     context = "\n\n---\n\n".join(parts)
 
-    # Safety net only; the budgeter above should keep us under the cap.
-    if len(context) > MAX_CONTEXT_CHARS:
-        context = context[:MAX_CONTEXT_CHARS] + "\n\n...(truncated)"
-
     return context
 
 
-def main():
+def main() -> None:
     if is_internal_invocation():
         return
-    context = build_context()
+    try:
+        payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
+    except (ValueError, OSError):
+        payload = {}
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    context = build_context(cwd if isinstance(cwd, str) else None)
 
     output = {
         "hookSpecificOutput": {
@@ -242,7 +272,7 @@ def main():
         }
     }
 
-    print(json.dumps(output))
+    print(json.dumps(output, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -5,6 +5,12 @@ from pathlib import Path
 
 from codex_exec import build_codex_command
 import runtime_config
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_codex_model(monkeypatch) -> None:
+    monkeypatch.delenv("MEMORY_CODEX_MODEL", raising=False)
 
 
 def test_runtime_config_defaults(monkeypatch, tmp_path: Path) -> None:
@@ -87,3 +93,32 @@ def test_get_compile_index_mode_default_and_validation(tmp_path, monkeypatch):
 
     (tmp_path / "rc.json").write_text('{"compile_index_mode": "bogus"}', encoding="utf-8")
     assert runtime_config.get_compile_index_mode() == "tiered"
+
+
+def test_codex_service_model_environment_overrides_project_config(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "runtime-config.json"
+    config_path.write_text('{"codex_model": "project-model"}', encoding="utf-8")
+    monkeypatch.setattr(runtime_config, "RUNTIME_CONFIG_FILE", config_path)
+    monkeypatch.setenv("MEMORY_CODEX_MODEL", "service-model")
+
+    assert runtime_config.get_codex_model() == "service-model"
+    assert json.loads(config_path.read_text()) == {"codex_model": "project-model"}
+
+
+@pytest.mark.parametrize("model", ["", "   ", 42, ["model"]])
+def test_codex_model_rejects_invalid_project_values(tmp_path, monkeypatch, model) -> None:
+    config_path = tmp_path / "runtime-config.json"
+    config_path.write_text(json.dumps({"codex_model": model}), encoding="utf-8")
+    monkeypatch.setattr(runtime_config, "RUNTIME_CONFIG_FILE", config_path)
+
+    with pytest.raises(ValueError, match="non-empty string"):
+        runtime_config.get_codex_model()
+
+
+def test_codex_binary_pin_is_optional_project_configuration(tmp_path, monkeypatch):
+    config_path = tmp_path / "runtime-config.json"
+    monkeypatch.setattr(runtime_config, "RUNTIME_CONFIG_FILE", config_path)
+    assert runtime_config.get_codex_bin() is None
+
+    config_path.write_text('{"codex_bin": "/service/codex"}', encoding="utf-8")
+    assert runtime_config.get_codex_bin() == "/service/codex"

@@ -5,6 +5,15 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import kb_db
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def legacy_hook_state(monkeypatch):
+    # Canonical hook behavior has separate integration tests against temporary stores.
+    monkeypatch.setattr(kb_db, "canonical_store", lambda root=None: None)
+
 
 def load_session_start_module():
     root = Path(__file__).resolve().parent.parent
@@ -168,3 +177,46 @@ def test_load_usage_counts_missing_and_corrupt(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(mod, "USAGE_FILE", good)
     assert mod.load_usage_counts() == {"concepts/x": 3}
+
+
+def test_recent_rows_cannot_starve_hub_budget():
+    mod = load_session_start_module()
+    rows = mod.parse_index_rows(SAMPLE_INDEX)
+    rows.extend({**rows[0], "link": f"[[concepts/recent-{i}]]", "summary": "x" * 160}
+                for i in range(30))
+    section = mod.build_kb_section(rows, NOW, budget=2200)
+    assert "[[concepts/old-hub]]" in section
+    assert "[[concepts/fresh-topic]]" in section
+
+
+def test_russian_context_obeys_utf8_bytes_and_complete_rows():
+    mod = load_session_start_module()
+    rows = [{"link": f"[[concepts/russian-{i}]]", "summary": "Восстановление состояния " * 8,
+             "sources": "daily/a.md", "source_count": 1, "updated": "2026-06-09"}
+            for i in range(20)]
+    section = mod.build_kb_section(rows, NOW, budget=2000)
+    assert len(section.encode("utf-8")) <= 2000
+    assert all(line.endswith(" |") for line in section.splitlines()
+               if line.startswith("| [["))
+
+
+def test_huge_recent_log_does_not_remove_knowledge_context(tmp_path, monkeypatch):
+    mod = load_session_start_module()
+    index = tmp_path / "index.md"
+    index.write_text(SAMPLE_INDEX, encoding="utf-8")
+    monkeypatch.setattr(mod, "INDEX_FILE", index)
+    monkeypatch.setattr(mod, "get_recent_log", lambda: "Длинная строка " * 3000)
+    context = mod.build_context()
+    assert len(context.encode("utf-8")) <= mod.MAX_CONTEXT_CHARS
+    assert "## Knowledge Base" in context
+    assert "...(truncated)" not in context
+
+
+def test_multiline_summary_stays_one_complete_table_row():
+    mod = load_session_start_module()
+    rows = mod.parse_index_rows(SAMPLE_INDEX)
+    rows[0]["summary"] = "first line\nsecond | value"
+    section = mod.build_kb_section(rows, NOW, budget=2000)
+    line = next(line for line in section.splitlines() if "[[concepts/fresh-topic]]" in line)
+    assert line.endswith(" |")
+    assert "first line second \\| value" in line

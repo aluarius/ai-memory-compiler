@@ -1,13 +1,15 @@
 """Nightly maintenance for the memory compiler.
 
 Designed to run unattended from launchd/cron. Does, in order:
-  1. flush.py --retry-failed   — drain recoverable failed flushes
-  2. lint.py --fix             — mechanical KB repairs (backlinks, index stubs)
-  3. weekly (Sunday): lint.py full run with the LLM contradictions check
-  4. health.py                 — final status; macOS notification if not ok
+  1. flush.py --drain          — recover canonical jobs (legacy: --retry-failed)
+  2. compile.py --skip-today   — process previous days' remaining source work
+  3. lint.py --fix             — mechanical repairs, then summary/index refresh
+  4. weekly (Sunday): lint.py full run with the read-only contradictions check
+  5. health.py --strict       — final status; macOS notification if not ok
 
 All steps are best-effort: a failing step logs and continues so one bad
 component doesn't block the rest of the maintenance pass.
+Any failed step makes the overall command exit nonzero and triggers notification.
 
 Usage:
     uv run python scripts/maintenance.py            # normal nightly pass
@@ -92,32 +94,37 @@ def main(argv: list[str] | None = None) -> int:
 
     # A large backlog drains at ~20-30s per context (live run: 55 contexts in
     # ~25 min), so this step gets a bigger budget than the default.
-    run_step(
+    codes = [run_step(
         "retry-failed",
-        uv + [str(SCRIPTS_DIR / "flush.py"), "--retry-failed"],
+        uv + [str(SCRIPTS_DIR / "flush.py"), "--drain" if (SCRIPTS_DIR / "memory.sqlite").exists() else "--retry-failed"],
         timeout=60 * 60,
-    )
-    run_step("lint-fix", uv + [str(SCRIPTS_DIR / "lint.py"), "--fix"])
+    )]
+    codes.append(run_step("compile", uv + [str(SCRIPTS_DIR / "compile.py"), "--skip-today"]))
+    codes.append(run_step("lint-fix", uv + [str(SCRIPTS_DIR / "lint.py"), "--fix"]))
 
     # Post-compile covers the normal path; this drains anything left over.
     # At 04:30 a locked keychain makes the LLM call fail harmlessly.
-    run_step("index-rewrite", uv + [str(SCRIPTS_DIR / "index_rewrite.py")])
-    run_step("kb-index", uv + [str(SCRIPTS_DIR / "kb_db.py"), "rebuild"])
+    codes.append(run_step("index-rewrite", uv + [str(SCRIPTS_DIR / "index_rewrite.py")]))
+    codes.append(run_step("kb-index", uv + [str(SCRIPTS_DIR / "kb_db.py"), "rebuild"]))
+    if (SCRIPTS_DIR / "memory.sqlite").exists() and (SCRIPTS_DIR / "semantic-index.sqlite").exists():
+        codes.append(run_step("semantic-index", uv + [str(SCRIPTS_DIR / "semantic_search.py"), "index", "--offline"]))
 
     if args.full_lint or now.weekday() == WEEKLY_FULL_LINT_WEEKDAY:
-        run_step("lint-full", uv + [str(SCRIPTS_DIR / "lint.py")])
+        codes.append(run_step("lint-full", uv + [str(SCRIPTS_DIR / "lint.py")]))
 
-    health_code = run_step("health", uv + [str(SCRIPTS_DIR / "health.py")])
+    health_code = run_step("health", uv + [str(SCRIPTS_DIR / "health.py"), "--strict"])
+    codes.append(health_code)
 
     logging.info("=== maintenance pass finished (health exit %d) ===", health_code)
 
-    if health_code != 0 and not args.no_notify:
+    failed = any(code != 0 for code in codes)
+    if failed and not args.no_notify:
         notify(
             "Memory Compiler",
             "Maintenance found issues — run: uv run python scripts/health.py",
         )
 
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

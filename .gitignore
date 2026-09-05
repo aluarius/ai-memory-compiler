@@ -36,3 +36,8 @@ Thumbs.db
 .obsidian/
 scripts/maintenance.log
 .worktrees/
+scripts/memory.sqlite*
+scripts/semantic-index.sqlite*
+scripts/.model-cache/
+scripts/.models/
+scripts/memory-migration-*/

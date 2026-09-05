@@ -1,26 +1,36 @@
 # AI Memory Compiler
 
-> Originally forked from [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler), now an independent project with multi-agent support.
+Originally forked from [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler).
 
-**Your AI conversations compile themselves into a searchable knowledge base.**
+Compile Claude Code and Codex conversations into durable, searchable memory.
+Hooks queue sanitized context, a model extracts useful daily notes, and a
+validated compiler turns those notes into cross-referenced articles.
 
-Works with **Claude Code** and **Codex**. Sessions are captured automatically via hooks, important knowledge is extracted into daily logs, then compiled into structured, cross-referenced articles. At the start of every session your agent gets the knowledge base index — so it "remembers" what it learned before.
+SQLite owns sources, articles, revisions, checkpoints and retry jobs.
+Markdown remains available as an optional export for reading or Obsidian.
+Agents retrieve canonical content through MCP, using BM25 or optional local
+multilingual hybrid search.
 
-No vector database, no embeddings, no RAG — just markdown and an index the LLM reads directly. At personal scale (up to ~500 articles) this [outperforms vector similarity](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+## Quick start
 
-The default processing path uses Claude Agent SDK, which is covered by your
-Claude subscription (Max, Team, or Enterprise). If you deliberately switch a
-task runtime to Codex/OpenAI, treat that as a separate cost decision.
-
-## Quick Start
+Requires Python 3.12+ and `uv`.
 
 ```bash
 git clone https://github.com/aluarius/ai-memory-compiler
 cd ai-memory-compiler
 uv sync
+uv run python scripts/memory_migrate.py
+uv run python scripts/health.py --json
 ```
 
-Then configure hooks for your agent(s).
+Migration initializes an empty store or imports the existing legacy corpus.
+For an existing installation, stop its capture and maintenance processors
+first and follow the [migration checklist](docs/operations.md#migration-and-cutover).
+Migration retains the original files and a legacy tar backup.
+
+Configure your model runtime and hooks next. Extraction and compilation use
+the selected Claude or Codex runtime and its credentials; costs and account
+limits depend on that runtime. Retrieval does not call a hosted model.
 
 ### Claude Code
 
@@ -61,9 +71,9 @@ Add these entries inside the top-level `"hooks"` object:
 ]
 ```
 
-- **SessionStart** — injects knowledge base index into every session
-- **SessionEnd** — captures the conversation and extracts knowledge
-- **PreCompact** — safety net before auto-compaction discards context
+- **SessionStart** injects a project-aware, byte-bounded catalog slice.
+- **SessionEnd** durably queues sanitized context for background extraction.
+- **PreCompact** captures context before compaction discards it.
 
 > Troubleshooting: `SessionStart hook (failed) — exited with code 127` means
 > `uv` is not on PATH in the environment Claude Code was launched from (e.g.
@@ -81,8 +91,7 @@ Add these entries inside the top-level `"hooks"` object:
 
 ### Codex
 
-Codex hooks are documented now, but they are still experimental and disabled by
-default.
+For a Codex build that supports the hook feature flag, enable hooks as follows.
 
 File 1: `~/.codex/config.toml`
 
@@ -124,124 +133,97 @@ for repo-local hooks, but this project's recommended setup is the global file:
 }
 ```
 
-- **SessionStart** — same knowledge base injection as Claude Code
-- **Stop** — turn-scoped auto-import using Codex's official `transcript_path`
-  hook payload; it persists a per-session message checkpoint and imports only
-  the unseen range (splitting large deltas without gaps), with a legacy
-  transcript-scan fallback for older builds
-- If Codex is installed through NVM or another shell-only manager, set
-  `MEMORY_CODEX_BIN` in the Stop command so every flush and compile child uses
-  the real binary rather than a GUI or terminal wrapper
-- Codex does not currently provide a true session-end hook equivalent to
-  Claude Code's `SessionEnd`
-- If you define the same hook in both `~/.codex/hooks.json` and
-  `<repo>/.codex/hooks.json`, Codex runs both
+- **SessionStart** uses the same canonical context as Claude Code.
+- **Stop** captures unseen turns from `transcript_path`, with a legacy
+  transcript-scan fallback. Queue insertion and capture checkpoint advancement
+  share a transaction; a failed worker spawn does not lose the queued range.
+- Use the real Codex executable, not a GUI wrapper. A project `codex_bin` in
+  `scripts/runtime-config.json` overrides the `MEMORY_CODEX_BIN` fallback shown
+  above. See [runtime configuration](docs/operations.md#runtime-configuration).
+- Stop is turn-scoped; this integration does not treat it as session end.
+- Configure each hook in one place. Global and repository-local definitions
+  can both run.
 
-### MCP Server (optional)
+### MCP retrieval
 
-Gives Claude Code tools to search the knowledge base mid-session. Add to `~/.claude/.mcp.json`:
+Register the stdio server with Claude Code:
+
+```bash
+claude mcp add --scope user knowledge-base -- uv run --directory /path/to/ai-memory-compiler python scripts/mcp_server.py
+```
+
+Other MCP clients use command `uv` with these arguments:
 
 ```json
-{
-  "mcpServers": {
-    "knowledge-base": {
-      "command": "uv",
-      "args": ["run", "--directory", "/path/to/ai-memory-compiler", "python", "scripts/mcp_server.py"]
-    }
-  }
-}
+["run", "--directory", "/path/to/ai-memory-compiler", "python", "scripts/mcp_server.py"]
 ```
 
-Tools: `search_knowledge`, `list_articles`, `read_article`, `search_daily_logs`.
+The server exposes five tools:
 
-## How It Works
+| Tool | Purpose |
+| --- | --- |
+| `search_knowledge(query, project=None, mode="hybrid")` | Find articles; `mode="bm25"` selects lexical search |
+| `list_articles(project=None)` | List all articles or one project's articles |
+| `read_article(path)` | Read the complete canonical article |
+| `search_daily_logs(query, last_n_days=7, include_archive=True)` | Search active and archived sources; use `0` for all dates |
+| `read_source(path)` | Read exact source provenance, including archive aliases |
 
-```
-Session ends -> hook captures transcript -> sanitize secrets -> flush.py extracts knowledge
-  -> daily/YYYY-MM-DD.md -> compile.py -> knowledge/concepts/, connections/
-    -> next session starts -> hook injects recent+hub index slice -> agent "remembers"
-      -> anything deeper -> knowledge-base MCP tools (search_knowledge, read_article)
-```
+The hook uses the session's `cwd` to select project and shared context within
+9,500 UTF-8 bytes. MCP reads SQLite even if exported Markdown is absent.
+An unavailable semantic index gives an explicit BM25 fallback, not a model
+download.
 
-- **flush.py** — decides what's worth saving (runs after every session; serialized LLM calls,
-  backoff retries, failed contexts auto-recovered later — see docs/operations.md)
-- **compile.py** — compiles daily logs into wiki articles (full compile after 10 PM,
-  daytime backlog compile of past days via --skip-today)
-- **Sensitive data** (API keys, tokens, passwords) is redacted before anything is saved
-- **Old logs** are archived after 30 days
-
-## Key Commands
+### Optional local semantic search
 
 ```bash
-uv run python scripts/health.py                      # local operational health summary
-uv run python scripts/compile.py                     # compile new daily logs
-uv run python scripts/compile.py --dry-run            # preview what would compile
-uv run python scripts/lint.py --fix                   # mechanical KB repairs (free)
-uv run python scripts/lint.py --structural-only       # structural lint report (free)
-uv run python scripts/kb_db.py search "query"          # BM25 search over the FTS index (free)
-uv run python scripts/index_rewrite.py --dry-run       # list bloated index summaries (free)
-uv run python scripts/consolidate.py --dry-run         # list thin fold candidates (free)
-uv run python scripts/flush.py --retry-failed          # drain failed flush contexts
-uv run python scripts/import_session.py transcript.jsonl --agent codex  # manual import
+uv sync --extra semantic
+uv run --extra semantic python scripts/semantic_search.py index
+uv run --extra semantic python scripts/evaluate_retrieval.py
 ```
 
-For routine maintenance, start with:
+The explicit indexing command can download the official
+`intfloat/multilingual-e5-small` model into `scripts/.models/`.
+Normal queries load only cached files. The separate
+`scripts/semantic-index.sqlite` is disposable and keyed by model and article
+content. Reindex after article changes; rerunning skips unchanged embeddings.
+
+On a copied 569-article corpus, 32 reviewed Russian questions improved Hit@5
+from 71.9% with BM25 to 90.6% with hybrid search. Median latency increased
+from 1.9 ms to 98 ms. This is a small, corpus-specific gold set, not a general
+quality guarantee. See [measurement details](docs/storage-options.md#measured-retrieval).
+
+## Routine commands
 
 ```bash
-uv run python scripts/health.py
+uv run python scripts/health.py --json
+uv run python scripts/flush.py --drain --limit 10
+uv run python scripts/compile.py --dry-run
+uv run python scripts/compile.py
+uv run python scripts/lint.py --structural-only
+uv run python scripts/memory_export.py
 ```
 
-It checks the KB graph, daily-log ingestion state, failed flush contexts,
-pending temp contexts, recent compile/flush logs, and runtime configuration
-without making LLM calls. See [docs/operations.md](docs/operations.md) for
-output semantics and exit codes.
+Queue processing and compilation can call the configured model. Health,
+dry-run, structural lint, export and BM25 search do not.
+A failed export leaves canonical commits intact; retry the export separately.
 
-### Retrieval beyond the injected index
-
-The session-start hook injects a tiered slice of the index (articles updated
-in the last 14 days + the most-compiled hub articles). Everything else is
-reachable through the `knowledge-base` MCP server:
+Manual transcript import remains available:
 
 ```bash
-claude mcp add --scope user knowledge-base -- uv run --directory /path/to/this/repo python scripts/mcp_server.py
+uv run python scripts/import_session.py transcript.jsonl --agent codex
 ```
 
-Tools: `search_knowledge`, `read_article`, `list_articles`, `search_daily_logs`.
+For macOS unattended maintenance, review paths and environment in
+[the launchd template](docs/launchd-maintenance.plist) before installing it.
+The project `codex_bin` pin takes precedence over a launchd
+`MEMORY_CODEX_BIN` value.
 
-### Unattended maintenance (macOS)
+## Status and references
 
-`scripts/maintenance.py` drains failed flushes, applies mechanical lint fixes,
-runs the weekly full lint (Sundays), and posts a notification if health is not
-ok. Schedule it with launchd:
+The SQLite implementation and cutover acceptance gate are being integrated.
+The copied-corpus retrieval measurement is complete; it does not establish
+that the live queue has drained or the live installation has switched over.
 
-```bash
-cp docs/launchd-maintenance.plist ~/Library/LaunchAgents/com.aluarius.memory-compiler-maintenance.plist
-# edit the repo path inside if yours differs, then:
-launchctl load ~/Library/LaunchAgents/com.aluarius.memory-compiler-maintenance.plist
-```
-
-When Codex is installed through NVM, also set `MEMORY_CODEX_BIN` in that
-plist to its absolute executable path (for example,
-`/Users/you/.nvm/versions/node/vX.Y.Z/bin/codex`). launchd does not source
-the interactive shell configuration that puts NVM on `PATH`.
-
-## What's Different from Upstream
-
-Added on top of the original [coleam00/claude-memory-compiler](https://github.com/coleam00/claude-memory-compiler):
-
-- **Codex support** — automatic capture via documented Codex hooks, with
-  turn-scoped `Stop` behavior instead of Claude Code's `SessionEnd`
-- **Official Codex hook support** — uses documented `hooks.json` payloads for
-  `SessionStart` and `Stop`
-- **MCP server** — search and read knowledge base articles from any session
-- **Secret redaction** — API keys, tokens, passwords masked before saving
-- **Global hooks** — capture sessions from all projects, not just this one
-- **Reliability** — retry logic, failed-context preservation, file locking,
-  proper process detachment, temp cleanup, and local health checks
-
-## Technical Reference
-
-See **[AGENTS.md](AGENTS.md)** for the complete technical reference: article
-formats, hook architecture, script internals, and customization options. See
-**[docs/operations.md](docs/operations.md)** for routine maintenance and
-health-check semantics.
+- [Agent and compiler contract](AGENTS.md)
+- [Operations, backup and recovery](docs/operations.md)
+- [Storage alternatives and retrieval evidence](docs/storage-options.md)

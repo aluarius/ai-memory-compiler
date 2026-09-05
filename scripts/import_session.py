@@ -22,8 +22,9 @@ if str(SCRIPTS_DIR) not in sys.path:
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
-from sanitize import sanitize
-from session_utils import parse_transcript
+from sanitize import sanitize  # noqa: E402 - scripts and hooks paths are configured above.
+from session_utils import parse_transcript  # noqa: E402
+from migration_gate import writer_gate  # noqa: E402
 
 MAX_TURNS = 30
 MAX_CONTEXT_CHARS = 15_000
@@ -69,13 +70,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def _prepare_legacy_import(args: argparse.Namespace) -> tuple[list[str], Path] | None:
+    """Persist the legacy handoff while the caller holds the migration gate."""
     transcript = args.transcript
-    if not transcript.exists():
-        print(f"Transcript not found: {transcript}", file=sys.stderr)
-        return 1
-
     parsed = parse_transcript(
         transcript,
         max_turns=MAX_TURNS,
@@ -86,7 +83,7 @@ def main() -> int:
     context = parsed.context.strip()
     if not context:
         print("Transcript did not contain usable text context.", file=sys.stderr)
-        return 1
+        return None
 
     context = sanitize(context)
     timestamp = datetime.now(UTC).astimezone().strftime("%Y%m%d-%H%M%S")
@@ -119,10 +116,49 @@ def main() -> int:
         cmd.extend(["--model", model])
     if cwd:
         cmd.extend(["--cwd", cwd])
+    return cmd, temp_context
+
+
+def main() -> int:
+    args = parse_args()
+    transcript = args.transcript
+    if not transcript.exists():
+        print(f"Transcript not found: {transcript}", file=sys.stderr)
+        return 1
+
+    with writer_gate(ROOT_DIR) as canonical:
+        if canonical:
+            from capture_service import capture_transcript
+            from memory_store import MemoryStore
+
+            store = MemoryStore(ROOT_DIR)
+            ids = capture_transcript(store, transcript, {
+                "session_id": args.session_id, "agent": args.agent, "provider": args.provider,
+                "model": args.model, "cwd": args.cwd, "source": args.source,
+            }, after_message_count=args.after_message_count or None,
+                until_message_count=args.until_message_count)
+        else:
+            prepared = _prepare_legacy_import(args)
+            if prepared is None:
+                return 1
+            cmd, temp_context = prepared
+
+    # A child flush selects its backend under the same gate. Never wait for
+    # that child while holding the parent gate; migration may import its
+    # already persisted context before the child starts.
+    if canonical:
+        from flush_service import process_jobs
+
+        for job_id in ids:
+            if process_jobs(store, job_id=job_id):
+                return 1
+        return 0
 
     completed = subprocess.run(cmd, cwd=str(ROOT_DIR), check=False)
     if completed.returncode != 0:
-        preserve_failed_context(temp_context)
+        with writer_gate(ROOT_DIR) as canonical_after:
+            if not canonical_after:
+                preserve_failed_context(temp_context)
     return completed.returncode
 
 
