@@ -51,6 +51,8 @@ The fit judgment concerns this workload, not a claim that DuckDB lacks transacti
 
 ## Measured retrieval
 
+### Initial copied-corpus measurement
+
 On 2026-09-05, a copied canonical corpus contained 569 articles and 146 sources.
 The [gold fixture](../tests/fixtures/retrieval-ru.json) contains 32 distinct Russian
 questions across 24 domain labels, with reviewed expected article paths, source
@@ -71,14 +73,15 @@ recall, or end-to-end agent latency.
 
 The hybrid uses the official `intfloat/multilingual-e5-small` ONNX model,
 384-dimensional mean-pooled normalized embeddings, and reciprocal rank fusion
-with BM25. The cache uses model revision
+with BM25 in this initial measurement. The cache uses model revision
 `614241f622f53c4eeff9890bdc4f31cfecc418b3`.
 It runs locally through optional FastEmbed, without query expansion or a reranker.
 
-The expanded fixture is frozen before measurement. Its original ten cases,
-including misses, remain unchanged; no question or ranking parameter is tuned
-after seeing the expanded results. All expected article paths exist, and the
-review confirms the referenced sources and article-source links.
+The expanded fixture was frozen before this measurement. Its original ten
+cases, including misses, remain unchanged. All expected article paths exist,
+and review confirms the referenced sources and article-source links. Later
+live acceptance exposed retrieval defects and informed the fixes below; this
+fixture is a diagnostic regression set, not an independent held-out benchmark.
 
 Both modes run with network connections blocked: zero connection attempts
 occur. Canonical generation and article/source hashes remain unchanged.
@@ -91,11 +94,34 @@ Hybrid still misses questions about Russian regex boundaries, stale async
 responses during rapid product selection, and sequence drift after importing
 explicit IDs. These cases stay in the fixture.
 
-This small, manually reviewed, corpus-specific set is not an independent
-held-out benchmark and does not establish broad statistical superiority.
-It supports enabling optional hybrid retrieval while retaining explicit BM25,
-visible fallback status and reproducible evaluation. Other tools in the
-comparison are not benchmarked here.
+This small, manually reviewed, corpus-specific set does not establish broad
+statistical superiority. Other tools in the comparison are not benchmarked here.
+
+### Live corpus changes and retrieval fixes
+
+Live compilation added four articles and changed some English articles to
+Russian. On the updated 573-article corpus, the same unchanged fixture dropped
+to 7/32 for BM25 and 19/32 for the original hybrid. Rare Russian function words
+received high lexical relevance scores in the mostly English corpus, allowing
+unrelated Russian articles to displace technical matches.
+
+The lexical query builder now filters generic Russian and English function
+words. Single-keyword searches and explicitly quoted or uppercase code tokens
+remain searchable, including `NOT IN` inside a Russian or English question.
+Synthetic cross-language and code-keyword regressions cover these boundaries.
+
+Summed reciprocal rank fusion exposed a separate weakness: two low-ranked
+matches could outrank a result ranked first by one provider. Hybrid now orders
+by the best provider rank, then uses reciprocal-rank agreement and path to
+break ties. Synthetic tests ensure that neither provider's leader is crowded
+out by their shared tail. This rule does not use project-specific weights or
+gold-answer exceptions.
+
+The [live rollout report](sqlite-rollout-2026-09-05.md#final-retrieval-acceptance)
+records the final corpus, current scores, semantic-only diagnostic and remaining
+misses. The initial 29/32 above is historical, not the final live score.
+Retain explicit BM25, visible fallback status and reproducible evaluation;
+retrieval success does not establish that an agent's answer is correct.
 
 ## Operational consequences
 
@@ -108,6 +134,6 @@ Obsidian reads an optional export. External edits require conflict review and
 explicit incorporation into canonical memory. Database backup and restore,
 not Git checkout of Markdown, define recovery.
 
-The code and live-cutover acceptance gate are being integrated. The copied
-corpus measurement above does not claim that live migration, backlog recovery
-or final export acceptance has completed. See [operations](operations.md).
+Live migration, preserved backlog recovery and final export validation are
+complete. See the [rollout evidence](sqlite-rollout-2026-09-05.md) and
+[operations guide](operations.md) for backups, checks and runtime limits.

@@ -117,10 +117,10 @@ Ownership: controller; `scripts/compile.py`, `scripts/flush.py`, import/capture 
   run export round trip, SQLite integrity checks, and lexical/hybrid evaluation.
 - [x] Verify the actual service CLI/model with a bounded prompt; fix project runtime
   selection without changing unrelated global settings.
-- [ ] Back up and migrate live data under the existing writer locks, confirm new
+- [x] Back up and migrate live data under the existing writer locks, confirm new
   capture and compilation work, and process the preserved backlog.
 - [x] Update README, AGENTS.md and operations documentation around the final system.
-- [ ] Commit the verified changes locally, integrate the working checkout, and
+- [x] Commit the verified changes locally, integrate the working checkout, and
   report actual validation, backup location and remaining operational limits.
 
 ## Progress
@@ -137,7 +137,7 @@ backward-compatible response optimization before the remaining live batches:
   final-graph and generation validation. Preserve omitted summary/projects.
 - [x] Permit empty edits only for explicit metadata changes; route summary-only
   maintenance and consolidation through the same materializer.
-- [ ] Run the full suite, independent review and a live resumed batch. Keep full
+- [x] Run the full suite, independent review and a live resumed batch. Keep full
   bodies for new articles and as a backward-compatible replacement format.
 
 ### Migration ledger
@@ -162,3 +162,15 @@ backward-compatible response optimization before the remaining live batches:
 - Final independent spool/gate review found no remaining High/Medium. Full suite
   is green at 334 tests. Runtime isolation reduces the measured single-context
   extraction to 29 seconds in the copied-store check. Ready for live cutover.
+- Live cutover is complete. All 569 original articles and 146 source prefixes
+  matched the legacy backup; all 49 preserved jobs and 51 newer jobs are done.
+  The final compile checkpoint covers the complete 359,361-byte source. The
+  resulting store contains 573 articles, with no stale or uncompiled sources.
+- Live acceptance exposed relocated-WAL portability, excessive complete-body
+  model responses, mixed-language lexical noise and fusion crowd-out. Each
+  correction has targeted regressions and independent review. The final suite
+  passes 368 tests on both Python 3.12 and 3.13; strict health exits 0.
+- Initial 29/32 hybrid relevance is historical, not the current live score.
+  Corpus changes exposed a regression; the frozen fixture and failed reports
+  remain preserved. See the [rollout report](../../sqlite-rollout-2026-09-05.md)
+  for final measurements, limits, backup paths and local commits. No push occurred.
