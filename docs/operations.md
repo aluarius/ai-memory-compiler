@@ -124,6 +124,12 @@ build events and the exact processed-byte checkpoint together. An interrupted
 later batch resumes from the committed prefix. A generation conflict rejects
 the stale proposal rather than overwriting newer memory.
 
+For existing articles, the model can return exact text replacements instead of
+repeating entire bodies. Python applies them to the original snapshot and checks
+the complete result. Missing, overlapping or otherwise ambiguous matches reject
+the batch without advancing its checkpoint. New articles still use full bodies;
+complete replacements remain supported when needed.
+
 Summary rewriting changes metadata only. Consolidation accepts deletions only
 inside its validated candidate set and preserves valid remaining references.
 Neither operation delegates unrestricted file editing or Git rollback to a model.
@@ -243,6 +249,10 @@ but does not silently discard sessions based on an unproven checkpoint.
 
 Use `MemoryStore.backup(destination)`, which calls SQLite's online backup API.
 Choose a new destination; the method refuses to overwrite an existing file.
+The backup is a standalone rollback-journal snapshot, safe to move and open
+read-only without WAL companions. Migration enables WAL after publishing the
+snapshot at its final path; restore tooling must do the same before restarting
+writers, using `MemoryStore(root).initialize()` on the validated installation.
 For example, from the repository root:
 
 ```bash

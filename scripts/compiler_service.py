@@ -8,6 +8,7 @@ import math
 import os
 import sqlite3
 import tempfile
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,15 +21,24 @@ from model_runtime import ModelResult, call_readonly_model
 DEFAULT_BATCH_BYTES = 64_000
 MAX_SUMMARY_CHARS = 200
 
-CHANGE_CONTRACT = """Return exactly one JSON object, without Markdown fences or commentary:
+CHANGE_CONTRACT = """Return exactly one JSON object, without Markdown fences or commentary.
+For EXISTING articles prefer concise exact edits, not repeated complete bodies:
+{"articles": [{"path": "concepts/example", "edits": [
+{"old": "exact unique existing text", "new": "replacement text"}]}]}.
+Edits apply in order to the original snapshot body. Each old string must be
+nonempty and occur exactly once at that step; include enough surrounding text
+to disambiguate. Do not use line numbers, ellipses, fuzzy matches or regex.
+Omitted summary and projects are preserved. To change metadata only, return
+"edits": [] with an explicit summary or projects field. Never mix body and edits.
+For NEW articles (or a necessary complete replacement), use:
 {"articles": [{"path": "concepts/example", "body": "complete Markdown with YAML frontmatter",
-"summary": "A concise current-state summary", "projects": ["project root or name"]}],
-"no_changes_reason": "required only when there are no changes"}.
+"summary": "A concise current-state summary", "projects": ["project root or name"]}]}.
+For no changes, return {"articles": [], "no_changes_reason": "nonempty explanation"}.
 Every article must have title, sources, created and updated in YAML frontmatter.
 Dates use YYYY-MM-DD. Sources are existing daily/YYYY-MM-DD.md identifiers.
 Paths use concepts/, connections/ or qa/ with lowercase hyphenated names.
 Summaries are nonempty, one line, at most 200 characters, without pipes or wikilinks.
-Return complete bodies for changed articles, preserve existing sources and useful facts,
+Preserve existing sources and useful facts in the resulting complete articles,
 and prefer updating an existing article over introducing a duplicate.
 Only meaningful wikilinks to existing or proposed article paths are allowed.
 Read knowledge/index.md first, then snapshot/catalog.json for project/source metadata,
@@ -48,7 +58,36 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict:
     return result
 
 
-def parse_changes(response: str, *, allow_deletions: bool = False) -> tuple[list[dict], list[str], str]:
+def _materialize_edits(change: dict, existing: dict[str, dict]) -> dict:
+    """Apply exact replacements in memory; never read a newer database version."""
+    if "body" in change or not isinstance(change.get("path"), str):
+        raise StoreValidationError("Exact edits require a path and cannot include a body")
+    original = existing.get(article_path(change["path"]))
+    if original is None:
+        raise StoreValidationError("Exact edits require an existing snapshot article")
+    edits = change["edits"]
+    if not isinstance(edits, list) or (not edits and not {"summary", "projects"} & change.keys()):
+        raise StoreValidationError("Exact edits must be a list; empty edits require explicit metadata")
+    body = original["body"]
+    for edit in edits:
+        if (not isinstance(edit, dict) or set(edit) != {"old", "new"}
+                or not isinstance(edit["old"], str) or not edit["old"]
+                or not isinstance(edit["new"], str)):
+            raise StoreValidationError("Each exact edit requires nonempty old text and string new text")
+        first = body.find(edit["old"])
+        if first < 0 or first != body.rfind(edit["old"]):
+            raise StoreValidationError(f"Exact edit must match once in {original['path']}")
+        body = body.replace(edit["old"], edit["new"], 1)
+    return {
+        "path": original["path"], "body": body,
+        "summary": change.get("summary", original["summary"]),
+        "projects": change.get("projects", original["projects"]),
+    }
+
+
+def parse_changes(
+    response: str, *, allow_deletions: bool = False, existing_articles: Sequence[dict] = (),
+) -> tuple[list[dict], list[str], str]:
     """Reject malformed, ambiguous, empty, or unsupported model changes."""
     try:
         value = json.loads(response, object_pairs_hook=_unique_object)
@@ -66,15 +105,21 @@ def parse_changes(response: str, *, allow_deletions: bool = False) -> tuple[list
     reason = value.get("no_changes_reason", "")
     if not isinstance(reason, str) or (not changes and not deletions and not reason.strip()):
         raise StoreValidationError("An empty change set requires a nonempty no_changes_reason")
+    existing = {item["path"]: item for item in existing_articles}
+    materialized = []
     for change in changes:
-        if not isinstance(change, dict) or set(change) - {"path", "body", "summary", "projects"}:
+        if not isinstance(change, dict) or set(change) - {"path", "body", "summary", "projects", "edits"}:
             raise StoreValidationError("Unsupported article change fields")
+        inherited_summary = "edits" in change and "summary" not in change
+        if "edits" in change:
+            change = _materialize_edits(change, existing)
         if not {"path", "body", "summary"} <= change.keys():
             raise StoreValidationError("Every article change requires path, body and summary")
         parsed = parse_article(change)
-        if len(parsed["summary"]) > MAX_SUMMARY_CHARS or "[[" in parsed["summary"]:
+        if not inherited_summary and (len(parsed["summary"]) > MAX_SUMMARY_CHARS or "[[" in parsed["summary"]):
             raise StoreValidationError("Article summary exceeds the concise plain-text contract")
-    return changes, [article_path(path) for path in deletions], reason.strip()
+        materialized.append(change)
+    return materialized, [article_path(path) for path in deletions], reason.strip()
 
 
 def _hash_matches(data: bytes, digest: Any) -> bool:
@@ -207,7 +252,7 @@ async def compile_source(
         "Read this complete source batch before proposing articles. Deletions are forbidden.",
         task="compile", source=(path, chunk),
     )
-    changes, _, reason = parse_changes(result.text)
+    changes, _, reason = parse_changes(result.text, existing_articles=snapshot["articles"])
     checkpoint = {
         "hash": hashlib.sha256(data[:end]).hexdigest(), "size": end,
         "compiled_at": timestamp(), "cost_usd": result.cost_usd,
@@ -245,10 +290,10 @@ async def rewrite_summaries(store: MemoryStore, *, batch_size: int = 50) -> int:
         result = await _propose(
             store, snapshot,
             "Rewrite only summary fields for these articles: " + json.dumps(list(batch)) + ". "
-            "Return their exact existing body and projects unchanged, with a concise new summary. "
+            'Return "edits": [] and a concise new summary for each; leave body and projects unchanged. '
             "Read their complete bodies before summarizing.", task="lint",
         )
-        changes, _, _ = parse_changes(result.text)
+        changes, _, _ = parse_changes(result.text, existing_articles=snapshot["articles"])
         for item in changes:
             original = batch.get(article_path(item["path"]))
             if (original is None or item["body"] != original["body"]
@@ -278,12 +323,12 @@ async def consolidate_articles(store: MemoryStore, pairs: list[dict]) -> bool:
         store, snapshot,
         "For these overlapping pairs choose FOLD, LINK, or KEEP based on their full bodies: "
         + json.dumps(pairs) + ". Preserve distinct projects, provenance and unique facts. "
-        "For FOLD, include complete replacements and repair every inbound link. "
+        "For FOLD, include exact edits or complete replacements and repair every inbound link. "
         "Only candidate articles may be deleted. The JSON may additionally contain "
         '"deletions": ["concepts/obsolete"]. KEEP with no changes requires no_changes_reason.',
         task="consolidate",
     )
-    changes, deletions, _ = parse_changes(result.text, allow_deletions=True)
+    changes, deletions, _ = parse_changes(result.text, allow_deletions=True, existing_articles=snapshot["articles"])
     if set(deletions) - candidates:
         raise StoreValidationError("Consolidation attempted to delete outside the candidate scope")
     changed = {item["path"]: parse_article(item) for item in changes}

@@ -125,6 +125,23 @@ Ownership: controller; `scripts/compile.py`, `scripts/flush.py`, import/capture 
 
 ## Progress
 
+### Live compile response-size follow-up
+
+The first live 63,914-byte batch succeeded but rewrote approximately 85 KB of
+existing article bodies for eight updates (plus two new articles). Add a bounded,
+backward-compatible response optimization before the remaining live batches:
+
+- [x] Test exact, unique text replacements against the model's original snapshot;
+  reject ambiguous/missing matches, unknown targets and mixed body/edit modes.
+- [x] Materialize patch proposals into complete bodies before existing schema,
+  final-graph and generation validation. Preserve omitted summary/projects.
+- [x] Permit empty edits only for explicit metadata changes; route summary-only
+  maintenance and consolidation through the same materializer.
+- [ ] Run the full suite, independent review and a live resumed batch. Keep full
+  bodies for new articles and as a backward-compatible replacement format.
+
+### Migration ledger
+
 - Baseline: 149 tests passed; live corpus has 569 articles and 146 daily logs.
 - Approved architecture is the user's preceding review response; no further
   approval is needed for this reversible implementation and local migration.

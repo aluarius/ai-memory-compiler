@@ -49,6 +49,28 @@ model output can require manual review. See [operations](docs/operations.md).
 
 Return one JSON object without fences or commentary:
 
+For existing articles, prefer exact text replacements to repeating long bodies:
+
+```json
+{
+  "articles": [
+    {
+      "path": "concepts/example",
+      "edits": [{"old": "A supported finding.", "new": "An updated supported finding."}]
+    }
+  ]
+}
+```
+
+Edits apply in order to the original snapshot. Each `old` string must be nonempty
+and match exactly once, including overlapping matches. Include enough surrounding
+text to make it unique; no fuzzy matching, line offsets or regular expressions.
+Python materializes and validates the complete result before the transaction.
+Omitted `summary` and `projects` stay unchanged. For metadata-only changes, use
+`"edits": []` with an explicit `summary` or `projects` field.
+
+For new articles, or a necessary complete replacement, use a full body:
+
 ```json
 {
   "articles": [
@@ -67,6 +89,9 @@ The reason must be nonempty. Unknown fields, duplicate JSON keys, malformed
 frontmatter, invalid dates, unknown sources and broken links are rejected.
 Summaries are nonempty, one line, at most 200 characters, and contain neither
 pipes nor wikilinks. `projects` is optional; keep known project scope intact.
+Never mix `body` and `edits` for one article. Patch targets must already exist in
+the original snapshot. Unchanged inherited legacy summaries remain untouched;
+new or explicitly changed summaries must satisfy the concise-summary contract.
 
 Normal compilation cannot delete articles. Only the consolidation workflow
 accepts a `deletions` list, constrained to reviewed candidates with valid

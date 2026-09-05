@@ -20,8 +20,11 @@ Markdown is a generated, human-readable interchange format.
 
 ## Compiler and writers
 
-Models return a validated JSON change set with complete article bodies and concise
-summaries. They can read exported knowledge but cannot modify the live corpus.
+Models return a validated JSON change set with exact text edits for existing
+articles, complete bodies for new articles, and concise changed summaries.
+Complete replacements remain compatible. Python applies edits only to the
+original snapshot, rejecting missing or ambiguous matches; omitted metadata is
+preserved. Models can read exported knowledge but cannot modify the live corpus.
 Python validates paths, frontmatter, sources, and references, then commits changed
 articles, revisions, build events, and ingestion checkpoints in one transaction.
 Optimistic generation checks reject work based on an outdated article snapshot.

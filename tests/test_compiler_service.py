@@ -155,6 +155,119 @@ def test_source_append_during_model_does_not_advance_past_processed_snapshot(sto
     assert len(service.pending_sources(store.snapshot())) == 1
 
 
+@pytest.mark.parametrize("summary", ["A useful summary", "x" * 250])
+def test_exact_edits_commit_complete_revision_and_preserve_omitted_metadata(store, monkeypatch, summary):
+    original = article(summary=summary)
+    store.commit_articles([original])
+    service = install_model(monkeypatch, json.dumps({"articles": [{
+        "path": "concepts/topic", "edits": [
+            {"old": "Useful facts.", "new": "Useful facts. First."},
+            {"old": "First.", "new": "First. Second."},
+        ],
+    }]}))
+
+    result = asyncio.run(service.compile_source(store, SOURCE))
+
+    saved = store.read_article("concepts/topic")
+    assert saved["body"] == original["body"].replace("Useful facts.", "Useful facts. First. Second.")
+    assert saved["summary"] == summary
+    assert saved["projects"] == ["example"]
+    assert saved["revision"] == 2
+    assert store.revisions("concepts/topic")[0]["body"] == original["body"]
+    assert result["processed_bytes"] == len(store.read_source(SOURCE).encode())
+
+
+@pytest.mark.parametrize("change", [
+    {"path": "concepts/topic", "edits": [{"old": "Absent text", "new": "Changed"}]},
+    {"path": "concepts/topic", "edits": [{"old": "topic", "new": "Changed"}]},
+    {"path": "concepts/topic", "edits": [{"old": "", "new": "Changed"}]},
+    {"path": "concepts/topic", "edits": [{"old": "Useful facts.", "new": None}]},
+    {"path": "concepts/topic", "edits": [{"old": "Useful facts.", "new": "Changed", "all": True}]},
+    {"path": "concepts/topic", "edits": {"old": "Useful facts.", "new": "Changed"}},
+    {"path": "concepts/topic", "edits": []},
+    {"path": "concepts/unknown", "edits": [{"old": "Useful facts.", "new": "Changed"}]},
+    {"path": None, "edits": [{"old": "Useful facts.", "new": "Changed"}]},
+    {"path": 42, "edits": [{"old": "Useful facts.", "new": "Changed"}]},
+    {"path": "concepts/topic", "body": "Conflicting replacement", "edits": []},
+])
+def test_invalid_exact_edits_preserve_entire_snapshot(store, monkeypatch, change):
+    store.commit_articles([article()])
+    before = store.snapshot()
+    service = install_model(monkeypatch, json.dumps({"articles": [change]}))
+
+    with pytest.raises(StoreValidationError, match="(?i)edit"):
+        asyncio.run(service.compile_source(store, SOURCE))
+
+    assert store.snapshot() == before
+
+
+def test_overlapping_exact_matches_are_ambiguous(store, monkeypatch):
+    original = article()
+    original["body"] += "\nbanana\n"
+    store.commit_articles([original])
+    before = store.snapshot()
+    service = install_model(monkeypatch, json.dumps({"articles": [{
+        "path": "concepts/topic", "edits": [{"old": "ana", "new": "ambiguous"}],
+    }]}))
+
+    with pytest.raises(StoreValidationError, match="match once"):
+        asyncio.run(service.compile_source(store, SOURCE))
+
+    assert store.snapshot() == before
+
+
+def test_exact_edits_cannot_bypass_final_graph_validation(store, monkeypatch):
+    store.commit_articles([article()])
+    before = store.snapshot()
+    service = install_model(monkeypatch, json.dumps({"articles": [{
+        "path": "concepts/topic", "edits": [{"old": "Useful facts.", "new": "[[concepts/missing]]"}],
+    }]}))
+
+    with pytest.raises(StoreValidationError, match="missing"):
+        asyncio.run(service.compile_source(store, SOURCE))
+
+    assert store.snapshot() == before
+
+
+def test_exact_edits_use_original_generation_not_newer_database_contents(store, monkeypatch):
+    store.commit_articles([article()])
+    service = install_model(monkeypatch, json.dumps({"articles": [{
+        "path": "concepts/topic", "edits": [{"old": "Useful facts.", "new": "Stale proposal."}],
+    }]}), lambda *_: store.commit_articles([article("concurrent")]))
+
+    with pytest.raises(StoreConflict):
+        asyncio.run(service.compile_source(store, SOURCE))
+
+    assert "Stale proposal." not in store.read_article("concepts/topic")["body"]
+    assert "ingested" not in store.get_state("pipeline", {})
+
+
+def test_summary_only_edits_do_not_require_repeating_article_body(store, monkeypatch):
+    original = article(summary="x" * 250)
+    store.commit_articles([original])
+    service = install_model(monkeypatch, json.dumps({"articles": [{
+        "path": "concepts/topic", "edits": [], "summary": "Concise summary",
+    }]}))
+
+    assert asyncio.run(service.rewrite_summaries(store)) == 1
+    saved = store.read_article("concepts/topic")
+    assert saved["body"] == original["body"]
+    assert saved["projects"] == ["example"]
+    assert saved["summary"] == "Concise summary"
+
+
+def test_consolidation_materializes_edits_before_provenance_validation(store, monkeypatch):
+    store.commit_articles([article("a"), article("b")])
+    service = install_model(monkeypatch, json.dumps({
+        "articles": [{"path": "concepts/a", "edits": [{"old": "Useful facts.", "new": "Combined facts."}]}],
+        "deletions": ["concepts/b"],
+    }))
+
+    assert asyncio.run(service.consolidate_articles(store, [{"a": "concepts/a", "b": "concepts/b"}]))
+    assert store.read_article("concepts/b") is None
+    assert "Combined facts." in store.read_article("concepts/a")["body"]
+
+
 def test_bounded_batches_preserve_utf8_and_resume_from_legacy_prefix_hash(store, monkeypatch):
     original = store.read_source(SOURCE)
     text = original + "Сеанс.\n" * 20
