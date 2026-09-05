@@ -193,19 +193,28 @@ def _cached_index(root: Path) -> SemanticIndex:
 
 def hybrid_search(query: str, articles: list[dict], *, root: Path, limit: int = 10,
                   index: SemanticIndex | None = None) -> list[dict]:
-    """Deterministic reciprocal rank fusion over the same prefiltered candidates."""
+    """Order by best provider rank, then reciprocal-rank agreement and path.
+
+    ``hybrid_rank`` is the best provider rank, not the output position.
+    ``hybrid_score`` is only the RRF tie-breaker, not a global sortable score.
+    """
     count = max(limit * 4, 40)
     lexical = kb_db.search_records(query, articles, count)
     semantic = (index or _cached_index(Path(root).resolve())).search(query, articles, count)
     scores: dict[str, float] = {}
+    best_ranks: dict[str, int] = {}
     records = {}
     for ranked in (semantic, lexical):
         for rank, article in enumerate(ranked, start=1):
             path = article["path"]
+            best_ranks[path] = min(best_ranks.get(path, rank), rank)
             scores[path] = scores.get(path, 0.0) + 1 / (60 + rank)
             records[path] = article
-    return [{**records[path], "hybrid_score": scores[path]}
-            for path in sorted(scores, key=lambda path: (-scores[path], path))[:limit]]
+    # Summed RRF alone lets two tail matches outrank even a unique first hit.
+    # Best-rank ordering keeps both providers' leaders; agreement orders rank ties.
+    paths = sorted(scores, key=lambda path: (best_ranks[path], -scores[path], path))
+    return [{**records[path], "hybrid_rank": best_ranks[path], "hybrid_score": scores[path]}
+            for path in paths[:limit]]
 
 
 def main() -> int:

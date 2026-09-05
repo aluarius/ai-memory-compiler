@@ -90,3 +90,27 @@ def test_reindex_reuses_unchanged_content_without_loading_model(tmp_path):
             raise RuntimeError("model is unavailable")
     assert SemanticIndex(tmp_path, backend=UnavailableEmbedder()).rebuild(records) == 1
     assert index.search("query", records)[0]["path"] == "concepts/backup"
+
+
+@pytest.mark.parametrize("strong_provider", ["semantic", "lexical"])
+def test_hybrid_preserves_provider_leader_despite_weak_shared_matches(tmp_path, strong_provider):
+    from kb_db import search_records
+    from semantic_search import SemanticIndex, hybrid_search
+
+    # The two providers disagree. Their shared tail must not crowd out either leader.
+    if strong_provider == "semantic":
+        target = article("concepts/rescue", "backup remedy")
+        distractors = [article(f"concepts/restore-{i}", "restore settings") for i in range(8)]
+    else:
+        target = article("concepts/restore", "restore")
+        distractors = [article(f"concepts/shared-{i}", "backup restore settings") for i in range(8)]
+    records = [target, *distractors]
+    index = SemanticIndex(tmp_path, backend=TinyEmbedder())
+    index.rebuild(records)
+    ranked = (index.search("restore", records) if strong_provider == "semantic"
+              else search_records("restore", records))
+    assert ranked[0]["path"] == target["path"]
+
+    results = hybrid_search("restore", records, root=tmp_path, index=index, limit=2)
+    assert target["path"] in [row["path"] for row in results]
+    assert len({row["path"] for row in results}) == 2

@@ -1,9 +1,56 @@
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 
 import kb_db
 import pytest
+
+
+@pytest.mark.parametrize("query,background,distractor", [
+    ("Как и почему это работает в Tokio?", "General implementation details and reference material.",
+     "Как и почему это работает, если это нужно в этом случае."),
+    ("How and why does this work with Tokio?", "Общие сведения о реализации и справочные материалы.",
+     "How and why does this work with these examples?"),
+])
+def test_function_words_do_not_dominate_a_mixed_language_corpus(query, background, distractor):
+    def record(path, title, body):
+        return {"path": path, "title": title, "summary": "Reference note", "body": body,
+                "updated": "2026-09-05", "sources": [],
+                "content_hash": hashlib.sha256(body.encode()).hexdigest()}
+
+    records = [record(f"concepts/background-{i}", f"Reference {i}", background) for i in range(60)]
+    records.append(record("concepts/tokio", "Tokio concurrency", "Tokio schedules asynchronous tasks."))
+    records.extend(record(f"concepts/unrelated-{i}", f"Unrelated subject {i}", distractor) for i in range(8))
+
+    assert kb_db.search_records(query, records, 5)[0]["path"] == "concepts/tokio"
+
+
+@pytest.mark.parametrize("query", ["как и почему это", "how and why this"])
+def test_function_word_only_query_has_no_lexical_candidates(query):
+    record = {"path": "concepts/unrelated", "title": "Unrelated", "summary": "Reference",
+              "body": query, "updated": "2026-09-05", "sources": [], "content_hash": query}
+
+    assert kb_db.search_records(query, [record], 5) == []
+
+
+def test_single_keyword_search_remains_literal_for_language_keywords():
+    record = {"path": "concepts/condition", "title": "Control flow", "summary": "Reference",
+              "body": "if", "updated": "2026-09-05", "sources": [], "content_hash": "if"}
+
+    assert kb_db.search_records("if", [record], 5)[0]["path"] == "concepts/condition"
+
+
+@pytest.mark.parametrize("query", [
+    "NOT IN", "DO WHILE", '"not in"', '"do while"',
+    "Почему SQL NOT IN не возвращает строки с NULL?", "Как работает DO WHILE в C?",
+    "Why does NOT IN exclude rows with NULL?", "How does DO WHILE work?",
+])
+def test_explicit_code_keywords_survive_function_word_filtering(query):
+    record = {"path": "concepts/keywords", "title": "Language expressions", "summary": "Reference",
+              "body": "NOT IN and DO WHILE", "updated": "2026-09-05", "sources": [], "content_hash": "keywords"}
+
+    assert kb_db.search_records(query, [record], 5)[0]["path"] == "concepts/keywords"
 
 
 HEADER = "# Index\n\n| Article | Summary | Compiled From | Updated |\n|---|---|---|---|\n"

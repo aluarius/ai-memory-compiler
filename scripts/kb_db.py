@@ -36,6 +36,29 @@ _BM25_WEIGHTS = "10.0, 5.0, 1.0"
 _TITLE_RE = re.compile(r'^title:\s*"?(.*?)"?\s*$', re.MULTILINE)
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 
+# Function words are not relevance evidence in natural-language questions.
+# In a mixed-language corpus, rare-language glue words otherwise receive high
+# IDF and let unrelated articles crowd out exact technical terms. Keep this
+# language-only list independent of projects and retrieval evaluation queries.
+_FUNCTION_WORDS = frozenset("""
+a about above after again against all am an and any are as at be because been
+before being below between both but by can could did do does doing down during
+each few for from further had has have having he her here hers herself him
+himself his how i if in into is it its itself just me more most my myself no nor
+not now of off on once only or other our ours ourselves out over own same she
+should so some such than that the their theirs them themselves then there these
+they this those through to too under until up very was we were what when where
+which while who whom why will with would you your yours yourself yourselves
+а без более бы был была были было быть в вам вас весь во вот все всего всех вы
+где да даже для до его ее её если есть еще ещё же за зачем здесь и из или им
+ими их к как какая какие какой когда кого кому который кто куда ли либо мне
+мной мною может можно мои мой моя мы на надо нам нас наш не него нее неё нет
+ни них но ну нужно о об обо он она они оно от перед по под почему при про
+с сам сама сами самый свою себе себя со так такая такие такой там те тем то
+того тоже той только том тому тот тут ты у уже уж чего чем через что чтобы
+чья чьи чей чьё чье эта эти это этой этом этот я
+""".split())
+
 # compile_index_slice knobs
 RECENT_DAYS = 14
 MAX_RECENT = 60
@@ -178,8 +201,15 @@ def rebuild_index(db_path: Path | None = None) -> int:
 
 
 def _fts_query(text: str, max_terms: int | None = None) -> str | None:
-    """Turn free text into a safe FTS5 OR-query; None when no word tokens."""
-    terms = _WORD_RE.findall(text.lower())
+    """Build a safe OR-query from meaningful terms; single-word searches stay literal."""
+    original_terms = _WORD_RE.findall(text)
+    terms = [term.lower() for term in original_terms]
+    literal = {word.lower() for match in re.finditer(r'(["`])(.+?)\1', text)
+               for word in _WORD_RE.findall(match[2])}
+    # Keep explicit code keywords even inside a natural-language question.
+    literal.update(word.lower() for word in original_terms if word.isascii() and word.isupper())
+    if len(terms) > 1:
+        terms = [term for term in terms if term not in _FUNCTION_WORDS or term in literal]
     if max_terms:
         # keep the most distinctive terms: prefer longer, then more frequent
         freq: dict[str, int] = {}
