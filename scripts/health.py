@@ -242,7 +242,7 @@ def collect_health() -> HealthReport:
     # Existence, rather than a permissive probe, keeps corrupt canonical storage
     # from silently selecting stale Markdown and JSON state.
     store = MemoryStore(KNOWLEDGE_DIR.parent, readonly=True)
-    if store.db_path.exists():
+    if store.db_path.exists() or store.db_path.is_symlink():
         return _collect_canonical_health(store)
     state = _read_json(STATE_FILE)
     issues = run_structural_checks()

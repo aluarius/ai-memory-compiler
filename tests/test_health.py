@@ -240,6 +240,27 @@ def test_health_corrupt_database_never_falls_back_to_markdown(monkeypatch, tmp_p
     assert health.exit_code(report, strict=False) == 2
 
 
+def test_health_dangling_database_link_never_reads_legacy_state(monkeypatch, tmp_path: Path) -> None:
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    database = scripts / "memory.sqlite"
+    database.symlink_to(scripts / "missing.sqlite")
+    monkeypatch.setattr(health, "KNOWLEDGE_DIR", tmp_path / "knowledge")
+    monkeypatch.setattr(health, "load_runtime_config", lambda: {})
+
+    def legacy_read_forbidden(*args, **kwargs):
+        raise AssertionError("An occupied canonical path must not select legacy state")
+
+    monkeypatch.setattr(health, "_read_json", legacy_read_forbidden)
+    report = health.collect_health()
+    assert report.backend == "sqlite"
+    assert report.status == "unhealthy"
+    assert report.database_errors
+    assert health.exit_code(report, strict=False) == 2
+    assert database.is_symlink()
+    assert not (scripts / "missing.sqlite").exists()
+
+
 def test_export_drift_checks_manifest_and_content_when_generation_is_unchanged(monkeypatch, tmp_path: Path) -> None:
     store = _canonical_health(monkeypatch, tmp_path)
     source = f"daily/{health.today_iso()}.md"
