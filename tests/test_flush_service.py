@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -202,6 +203,75 @@ def test_expired_job_lease_is_recovered(store, monkeypatch) -> None:
     assert flush_service.process_jobs(store, job_id=job_id) == 0
     assert store.jobs()[0]["attempts"] == 2
     assert store.jobs()[0]["status"] == "done"
+
+
+@pytest.mark.parametrize("outcome", ["success", "provider", "malformed"])
+def test_sleep_during_model_call_retains_outcome_without_repeating_call(store, monkeypatch, outcome):
+    job_id = enqueue(store)
+    async def after_sleep(*args, **kwargs):
+        with store.transaction() as connection:
+            connection.execute("UPDATE jobs SET lease_until=0 WHERE id=?", (job_id,))
+        if outcome == "provider":
+            raise RuntimeError("private provider diagnostic")
+        return ModelResult(text=SAVED if outcome == "success" else "invalid")
+    monkeypatch.setattr(flush_service, "call_readonly_model", after_sleep)
+    assert flush_service.process_jobs(store, job_id=job_id) == (0 if outcome == "success" else 1)
+    job = store.jobs()[0]
+    assert job["status"] == ("done" if outcome == "success" else "failed")
+    assert job["attempts"] == 1
+    assert "private" not in (job["last_error"] or "")
+    if outcome == "success":
+        assert store.read_source("daily/2026-08-30.md").count(SAVED) == 1
+    else:
+        assert store.list_sources() == []
+
+
+@pytest.mark.parametrize("provider_failure", [False, True])
+def test_sleep_recovery_never_steals_a_reassigned_job(store, monkeypatch, provider_failure):
+    job_id = enqueue(store)
+    replacement = []
+    async def reassigned(*args, **kwargs):
+        with store.transaction() as connection:
+            connection.execute("UPDATE jobs SET lease_until=0 WHERE id=?", (job_id,))
+        replacement.append(store.claim_job(job_id))
+        if provider_failure:
+            raise RuntimeError("provider failed")
+        return ModelResult(text=SAVED)
+    monkeypatch.setattr(flush_service, "call_readonly_model", reassigned)
+    assert flush_service.process_jobs(store, job_id=job_id) == 1
+    job = store.jobs()[0]
+    assert job["status"] == "running"
+    assert job["lease_token"] == replacement[0]["lease_token"]
+    assert store.list_sources() == []
+    assert not store.get_state("flush_worker", {}).get("cooldown_until")
+
+
+def test_lease_storage_error_is_not_recorded_as_provider_failure(store, monkeypatch):
+    job_id = enqueue(store)
+    stub_model(monkeypatch)
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("database temporarily unavailable")
+    monkeypatch.setattr(store, "renew_job_lease", unavailable)
+    with pytest.raises(sqlite3.OperationalError):
+        flush_service.process_jobs(store, job_id=job_id)
+    job = store.jobs()[0]
+    assert job["status"] == "running"
+    assert job["last_error"] is None
+    assert not store.get_state("flush_worker", {}).get("cooldown_until")
+
+
+def test_cancellation_is_not_masked_by_lease_renewal(store, monkeypatch):
+    job_id = enqueue(store)
+    async def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+    def lost(*args, **kwargs):
+        raise StoreConflict("lease changed")
+    monkeypatch.setattr(flush_service, "call_readonly_model", interrupted)
+    monkeypatch.setattr(store, "renew_job_lease", lost)
+    with pytest.raises(KeyboardInterrupt):
+        flush_service.process_jobs(store, job_id=job_id)
+    assert store.jobs()[0]["status"] == "running"
+    assert store.list_sources() == []
 
 
 def test_two_workers_do_not_duplicate_model_call_or_source(store, monkeypatch) -> None:

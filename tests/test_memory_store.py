@@ -58,6 +58,24 @@ def test_articles_revisions_and_sources_survive_without_exports(store: MemorySto
     assert store.list_articles(project="unrelated") == []
 
 
+@pytest.mark.parametrize("duration", [0, -1, float('inf'), float('nan')])
+def test_lease_renewal_rejects_invalid_duration(store, duration):
+    job_id = store.enqueue('context', {}, identity='renewal')
+    lease = store.claim_job(job_id)
+    with pytest.raises(ValueError, match='positive'):
+        store.renew_job_lease(job_id, lease['lease_token'], lease_seconds=duration)
+    assert store.jobs()[0]['lease_until'] == lease['lease_until']
+
+
+def test_lease_renewal_cannot_reopen_completed_job(store):
+    job_id = store.enqueue('context', {}, identity='renewal')
+    lease = store.claim_job(job_id)
+    store.complete_job(job_id, lease['lease_token'], '', 'daily/2026-09-01.md')
+    with pytest.raises(StoreConflict):
+        store.renew_job_lease(job_id, lease['lease_token'])
+    assert store.jobs()[0]['status'] == 'done'
+
+
 def test_commit_rejects_broken_links_and_preserves_checkpoint(store: MemoryStore) -> None:
     store.commit_articles([article()])
     generation = store.generation()

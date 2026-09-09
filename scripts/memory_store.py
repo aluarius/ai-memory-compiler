@@ -401,6 +401,23 @@ class MemoryStore:
             result["metadata"] = json.loads(result.pop("metadata_json"))
             return result
 
+    def renew_job_lease(self, job_id: str, token: str, *, lease_seconds: float = 1500) -> None:
+        """Renew an unchanged owner's lease, including after machine sleep.
+
+        The caller must still hold the runtime lock acquired before claiming.
+        A reassigned or completed job cannot be renewed, even with an old token.
+        This does not relax the live-lease checks on completion or failure.
+        """
+        if not math.isfinite(lease_seconds) or lease_seconds <= 0:
+            raise ValueError("Lease duration must be positive")
+        with self.transaction() as conn:
+            updated = conn.execute(
+                "UPDATE jobs SET lease_until=?,updated=? WHERE id=? AND status='running' AND lease_token=?",
+                (time.time() + lease_seconds, timestamp(), job_id, token),
+            )
+            if updated.rowcount != 1:
+                raise StoreConflict("Job lease belongs to another worker or is no longer running")
+
     @staticmethod
     def _require_lease(conn: sqlite3.Connection, job_id: str, token: str) -> None:
         row = conn.execute("SELECT status,lease_token,lease_until FROM jobs WHERE id=?", (job_id,)).fetchone()

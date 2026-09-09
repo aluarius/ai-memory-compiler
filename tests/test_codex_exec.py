@@ -48,6 +48,19 @@ def assert_process_exited(pid: int) -> None:
     pytest.fail(f"Process {pid} is still present after timeout cleanup")
 
 
+def start_deadline_after_file(monkeypatch, path: Path) -> None:
+    """Separate fixture interpreter startup from the deadline under test."""
+    original_wait = codex_exec._wait_with_deadline
+    def wait(process, timeout):
+        startup_deadline = time.monotonic() + 5
+        while not path.exists():
+            if process.poll() is not None or time.monotonic() >= startup_deadline:
+                raise AssertionError(f"Fixture did not become ready: {path.name}")
+            time.sleep(0.01)
+        return original_wait(process, timeout)
+    monkeypatch.setattr(codex_exec, "_wait_with_deadline", wait)
+
+
 def test_run_codex_prompt_streams_prompt_to_codex_stdin(tmp_path: Path, monkeypatch) -> None:
     """A large lint prompt must not be passed through argv and hit ARG_MAX."""
     fake_codex = tmp_path / "codex"
@@ -173,6 +186,7 @@ time.sleep(60)
     )
     monkeypatch.setenv("MEMORY_CODEX_BIN", str(executable))
     prompt = "private conversation: do not persist this context in errors"
+    start_deadline_after_file(monkeypatch, tmp_path / "child.pid")
     started = time.monotonic()
     try:
         with pytest.raises(RuntimeError, match="timed out") as error:
@@ -241,6 +255,87 @@ def test_failure_handles_non_utf8_stderr(tmp_path: Path, monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="unavailable"):
         codex_exec.run_codex_prompt("context", cwd=tmp_path, allow_edits=False)
+
+
+def test_timeout_keeps_safe_diagnostic_without_prompt(tmp_path, monkeypatch):
+    executable = write_python_codex(tmp_path, """import sys,time
+from pathlib import Path
+prompt = sys.stdin.read()
+sys.stderr.write('ERROR rejected: ' + prompt + '\\nERROR waiting for network\\n')
+sys.stderr.flush()
+Path('ready').touch()
+time.sleep(10)
+""")
+    start_deadline_after_file(monkeypatch, tmp_path / 'ready')
+    with pytest.raises(RuntimeError, match="timed out") as error:
+        codex_exec.run_codex_prompt('private conversation', cwd=tmp_path, allow_edits=False,
+                                   executable=executable, timeout_seconds=0.3)
+    assert "waiting for network" in str(error.value)
+    assert "private conversation" not in str(error.value)
+
+
+def test_diagnostics_redact_runtime_credentials_not_present_in_prompt(tmp_path):
+    stderr = tmp_path / "stderr.log"
+    stderr.write_text(
+        "ERROR Authorization: Bearer runtime-secret-token\n"
+        "ERROR connecting to https://service:runtime-password@localhost\n"
+    )
+    diagnostic = codex_exec._error_diagnostic(stderr, "ordinary request")
+    assert "runtime-secret-token" not in diagnostic
+    assert "runtime-password" not in diagnostic
+    assert "ERROR" in diagnostic
+
+
+def test_wall_clock_jump_expires_model_deadline(tmp_path, monkeypatch):
+    executable = write_python_codex(tmp_path, "import sys,time\nsys.stdin.read()\ntime.sleep(10)")
+    started = time.monotonic()
+    monkeypatch.setattr(codex_exec, "wall_time",
+                        lambda: 1000 if time.monotonic() - started < 0.2 else 5000,
+                        raising=False)
+    with pytest.raises(RuntimeError, match="timed out"):
+        codex_exec.run_codex_prompt('context', cwd=tmp_path, allow_edits=False,
+                                   executable=executable, timeout_seconds=2)
+    assert time.monotonic() - started < 1.5
+
+
+def test_clock_rollback_does_not_extend_model_deadline(tmp_path, monkeypatch):
+    executable = write_python_codex(tmp_path, "import sys,time\nsys.stdin.read()\ntime.sleep(10)")
+    started = time.monotonic()
+    monkeypatch.setattr(codex_exec, "wall_time",
+                        lambda: 1000 if time.monotonic() - started < 0.1 else 0)
+    with pytest.raises(RuntimeError, match="timed out"):
+        codex_exec.run_codex_prompt('context', cwd=tmp_path, allow_edits=False,
+                                   executable=executable, timeout_seconds=0.4)
+    assert time.monotonic() - started < 1.5
+
+
+def test_deadline_polling_resumes_partial_stdin_without_replaying_prompt(tmp_path):
+    executable = write_python_codex(tmp_path, """import sys,time
+from pathlib import Path
+time.sleep(0.6)
+prompt = sys.stdin.read()
+Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(prompt)
+""")
+    prompt = 'Large unicode input: Привет!\n' * 20_000
+    assert codex_exec.run_codex_prompt(prompt, cwd=tmp_path, allow_edits=False,
+                                      executable=executable, timeout_seconds=5) == prompt.strip()
+
+
+def test_macos_model_call_uses_scoped_idle_sleep_assertion(tmp_path, monkeypatch):
+    wrapper = tmp_path / 'caffeinate'
+    wrapper.write_text(f'#!{sys.executable}\nimport os,sys\n'
+                       'assert sys.argv[1] == "-i"\n'
+                       'os.environ["TEST_IDLE_ASSERTION"] = "active"\n'
+                       'os.execv(sys.argv[2], sys.argv[2:])\n')
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(codex_exec, "CAFFEINATE", wrapper, raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    executable = write_python_codex(tmp_path, """import os,sys
+from pathlib import Path
+Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(os.environ.get('TEST_IDLE_ASSERTION','missing'))
+""")
+    assert codex_exec.run_codex_prompt('context', cwd=tmp_path, allow_edits=False,
+                                      executable=executable) == 'active'
 
 
 @pytest.mark.parametrize("explicit_model", [None, "caller-selected-model"])

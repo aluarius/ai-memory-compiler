@@ -69,6 +69,22 @@ one transaction before it starts a detached worker. A failed spawn therefore
 leaves a recoverable job. Workers use expiring leases; an old worker cannot
 publish after another worker takes its lease.
 
+Workers renew their own unchanged lease after a model call while still holding
+the runtime lock. This preserves a completed response across machine sleep,
+without repeating the model call. A changed token or completed job rejects
+renewal; normal completion and failure still require a live lease.
+Renewal errors from local storage do not start a provider-wide cooldown.
+Cancellation unwinds without renewing the lease or replacing the cancellation
+with a storage error.
+
+On macOS, Codex model calls use a process-scoped `caffeinate -i` assertion to
+prevent idle system sleep. The display can sleep, and global power settings
+remain unchanged. Closing the lid or forcing sleep can still interrupt work.
+Codex deadlines check both wall time and monotonic time, so suspended time or
+a backwards clock adjustment cannot extend an unfinished call indefinitely.
+Timeout errors retain a bounded error diagnostic with prompt echoes removed
+and the shared credential redaction applied.
+
 Provenance uses a shared scalar whitelist and secret redaction. Checkpoint keys
 and import scope use an opaque hash of the original transcript identity, so
 redacted identifiers cannot merge unrelated sessions. Existing checkpoint keys

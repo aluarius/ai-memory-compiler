@@ -9,14 +9,42 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+from time import monotonic, time as wall_time
 
 from runtime_config import get_codex_bin, get_codex_model, get_codex_service_options
+
+HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+if str(HOOKS_DIR) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIR))
+from sanitize import sanitize  # noqa: E402 - reuse the shared credential redactor.
 
 STDERR_READ_LIMIT = 8192
 DIAGNOSTIC_LIMIT = 2048
 TERMINATION_GRACE_SECONDS = 1.0
+CAFFEINATE = Path("/usr/bin/caffeinate")
+
+
+def _wait_with_deadline(process: subprocess.Popen[str], timeout: float) -> None:
+    """Bound both elapsed awake time and wall time, including suspend/resume.
+
+    Stdin is an anonymous file, not a pipe: partial writes cannot stall polling
+    on Python versions that cannot resume communicate after an input timeout.
+    Clock rollback cannot extend the monotonic deadline.
+    """
+    wall_deadline = wall_time() + timeout
+    monotonic_deadline = monotonic() + timeout
+    while True:
+        remaining = min(wall_deadline - wall_time(), monotonic_deadline - monotonic())
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(process.args, timeout)
+        try:
+            process.wait(timeout=min(0.25, remaining))
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def build_codex_command(
@@ -138,7 +166,7 @@ def _error_diagnostic(stderr_path: Path, prompt: str) -> str:
         line.strip() for line in text.splitlines()
         if re.search(r"\b(?:error|fatal)\b", line, flags=re.IGNORECASE)
     ]
-    diagnostic = "\n".join(lines) or "no safe error diagnostic available"
+    diagnostic = sanitize("\n".join(lines)) or "no safe error diagnostic available"
     return diagnostic[-DIAGNOSTIC_LIMIT:]
 
 
@@ -171,13 +199,21 @@ def run_codex_prompt(
             isolate_config=isolated,
             reasoning_effort=effort,
         )
-        with stderr_path.open("w", encoding="utf-8") as stderr_handle:
+        if sys.platform == "darwin" and CAFFEINATE.is_file():
+            # Scoped to this process group; never changes global power settings
+            # or keeps the display awake. Forced sleep can still interrupt work.
+            cmd = [str(CAFFEINATE), "-i", *cmd]
+        with tempfile.TemporaryFile() as stdin_handle, stderr_path.open("w", encoding="utf-8") as stderr_handle:
+            # Anonymous, seekable input avoids pipe backpressure during deadline
+            # polling, keeps prompts out of argv, and disappears on close.
+            stdin_handle.write(prompt.encode("utf-8"))
+            stdin_handle.seek(0)
             child_env = os.environ.copy()
             child_env["MEMORY_COMPILER_INTERNAL"] = "1"
             with subprocess.Popen(
                 cmd,
                 cwd=str(cwd),
-                stdin=subprocess.PIPE,
+                stdin=stdin_handle,
                 text=True,
                 encoding="utf-8",
                 stdout=subprocess.DEVNULL,
@@ -187,10 +223,13 @@ def run_codex_prompt(
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             ) as process:
                 try:
-                    process.communicate(prompt, timeout=timeout_seconds)
+                    _wait_with_deadline(process, timeout_seconds)
                 except subprocess.TimeoutExpired:
                     _terminate_process_group(process)
-                    raise RuntimeError(f"Codex exec timed out after {timeout_seconds:g}s") from None
+                    diagnostic = _error_diagnostic(stderr_path, prompt)
+                    raise RuntimeError(
+                        f"Codex exec timed out after {timeout_seconds:g}s: {diagnostic}"
+                    ) from None
                 except BaseException:
                     _terminate_process_group(process)
                     raise

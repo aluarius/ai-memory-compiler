@@ -186,14 +186,25 @@ def process_jobs(
             job = store.claim_job(job_id, force=force, lease_seconds=JOB_LEASE_SECONDS)
             if job is None:
                 break
+            failure_detail: str | None = None
             try:
                 result = asyncio.run(_extract(job["context"]))
             except Exception as exc:
-                # The external runtime may echo prompt text in its exception.
-                # Keep the failure category without persisting request contents.
-                detail = f"Flush model call failed ({type(exc).__name__})"
-                _record_failure(store, job, detail, provider=True)
-                print(detail)
+                # Retain only the model failure category, never request text.
+                failure_detail = f"Flush model call failed ({type(exc).__name__})"
+            # Sleep can expire wall-clock leases while the OS lock stays held.
+            # Local storage errors must not trigger a provider-wide cooldown,
+            # and cancellation must unwind without being masked by renewal.
+            try:
+                store.renew_job_lease(job["id"], job["lease_token"], lease_seconds=JOB_LEASE_SECONDS)
+            except StoreConflict as exc:
+                store.event("flush_lease_lost", f"{job['id']}: {exc}")
+                print("Flush job ownership changed; the current worker did not publish a result.")
+                status = 1
+                break
+            if failure_detail is not None:
+                _record_failure(store, job, failure_detail, provider=True)
+                print(failure_detail)
                 status = 1
                 break
             try:
