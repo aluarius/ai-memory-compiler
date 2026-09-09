@@ -247,6 +247,18 @@ raise SystemExit(7)
     assert "private" not in diagnostic
 
 
+def test_failure_diagnostic_redacts_basic_credentials(tmp_path: Path, monkeypatch) -> None:
+    executable = write_python_codex(
+        tmp_path,
+        "import sys\nsys.stderr.write('ERROR Authorization: Basic dXNlcjpwYXNz\\n')\n"
+        "raise SystemExit(7)\n",
+    )
+    with pytest.raises(RuntimeError, match="exit 7") as error:
+        codex_exec.run_codex_prompt("fixture", cwd=tmp_path, allow_edits=False, executable=executable)
+    assert "dXNlcjpwYXNz" not in str(error.value)
+    assert "ERROR" in str(error.value)
+
+
 def test_failure_handles_non_utf8_stderr(tmp_path: Path, monkeypatch) -> None:
     executable = write_python_codex(
         tmp_path, "import sys\nsys.stderr.buffer.write(b'ERROR unavailable \\xff\\n')\nraise SystemExit(2)\n"

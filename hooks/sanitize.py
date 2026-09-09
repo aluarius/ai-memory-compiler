@@ -19,8 +19,9 @@ _PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?<=[\s=:'\"])[A-Za-z0-9/+=]{40}(?=[\s'\",])"), "[REDACTED_AWS_SECRET]"),
     # Bearer tokens
     (re.compile(r"(Bearer\s+)[A-Za-z0-9_\-.~+/]+=*", re.IGNORECASE), r"\1[REDACTED_TOKEN]"),
-    # Authorization headers
-    (re.compile(r"(Authorization:\s*)\S+", re.IGNORECASE), r"\1[REDACTED]"),
+    # Basic credentials are a separate token after the scheme, including in
+    # Proxy-Authorization headers. Never consume a following diagnostic line.
+    (re.compile(r"(Authorization:[ \t]*)(?:Basic[ \t]+)?\S+", re.IGNORECASE), r"\1[REDACTED]"),
     # Passwords in URLs (user:pass@host)
     (re.compile(r"://([^:]+):([^@]{3,})@"), r"://\1:[REDACTED]@"),
     # Password fields in configs/env
