@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from time import monotonic, time as wall_time
+from time import monotonic, sleep, time as wall_time
 
 from runtime_config import get_codex_bin, get_codex_model, get_codex_service_options
 
@@ -107,23 +107,34 @@ def resolve_codex_executable(executable: str | Path | None = None) -> str:
     return executable
 
 
+def _signal_process_group(pid: int, signum: int) -> None:
+    """Retry Darwin's exiting-group EPERM race; never ignore persistent denial."""
+    deadline = monotonic() + TERMINATION_GRACE_SECONDS
+    while True:
+        try:
+            os.killpg(pid, signum)
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            # XNU skips zombies while signalling a group and can return EPERM
+            # until the last group member is reaped. Other denials remain errors.
+            if sys.platform != "darwin" or monotonic() >= deadline:
+                raise
+            sleep(0.01)
+
+
 def _terminate_process_group(process: subprocess.Popen[str]) -> None:
     """Stop this invocation's descendants and reap its direct child."""
     if os.name == "posix":
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        _signal_process_group(process.pid, signal.SIGTERM)
         try:
             process.wait(timeout=TERMINATION_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
             pass
         finally:
             # The leader may exit while a descendant ignores SIGTERM.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            _signal_process_group(process.pid, signal.SIGKILL)
     else:
         try:
             subprocess.run(

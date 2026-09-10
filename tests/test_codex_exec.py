@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import errno
 import json
 import signal
 import sys
@@ -269,7 +270,22 @@ def test_failure_handles_non_utf8_stderr(tmp_path: Path, monkeypatch) -> None:
         codex_exec.run_codex_prompt("context", cwd=tmp_path, allow_edits=False)
 
 
-def test_timeout_keeps_safe_diagnostic_without_prompt(tmp_path, monkeypatch):
+@pytest.mark.parametrize("transient_cleanup_denial", [False, True])
+def test_timeout_keeps_safe_diagnostic_without_prompt(tmp_path, monkeypatch, transient_cleanup_denial):
+    if transient_cleanup_denial:
+        if os.name != "posix":
+            pytest.skip("Uses POSIX process groups")
+        original_killpg = os.killpg
+        denied = []
+
+        def killpg(pgid, signum):
+            if signum == signal.SIGKILL and not denied:
+                denied.append(pgid)
+                raise PermissionError(errno.EPERM, "Exiting process group")
+            return original_killpg(pgid, signum)
+
+        monkeypatch.setattr(codex_exec.sys, "platform", "darwin")
+        monkeypatch.setattr(codex_exec.os, "killpg", killpg)
     executable = write_python_codex(tmp_path, """import sys,time
 from pathlib import Path
 prompt = sys.stdin.read()
@@ -284,6 +300,27 @@ time.sleep(10)
                                    executable=executable, timeout_seconds=0.3)
     assert "waiting for network" in str(error.value)
     assert "private conversation" not in str(error.value)
+    if transient_cleanup_denial:
+        assert len(denied) == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Uses POSIX process groups")
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_process_group_signal_never_hides_permanent_permission_denial(monkeypatch, platform):
+    ticks = iter([0.0, 0.1, 2.0])
+    calls = []
+
+    def killpg(pgid, signum):
+        calls.append((pgid, signum))
+        raise PermissionError(errno.EPERM, "Genuine permission denial")
+
+    monkeypatch.setattr(codex_exec.sys, "platform", platform)
+    monkeypatch.setattr(codex_exec.os, "killpg", killpg)
+    monkeypatch.setattr(codex_exec, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(codex_exec, "sleep", lambda seconds: None)
+    with pytest.raises(PermissionError):
+        codex_exec._signal_process_group(12345, signal.SIGKILL)
+    assert len(calls) == (2 if platform == "darwin" else 1)
 
 
 def test_diagnostics_redact_runtime_credentials_not_present_in_prompt(tmp_path):

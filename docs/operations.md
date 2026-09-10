@@ -84,6 +84,9 @@ Codex deadlines check both wall time and monotonic time, so suspended time or
 a backwards clock adjustment cannot extend an unfinished call indefinitely.
 Timeout errors retain a bounded error diagnostic with prompt echoes removed
 and the shared credential redaction applied.
+On macOS, process-group cleanup briefly retries `EPERM` while exiting members
+are reaped. Persistent permission failures still propagate; cleanup never treats
+them as proof that the model process stopped.
 
 Provenance uses a shared scalar whitelist and secret redaction. Checkpoint keys
 and import scope use an opaque hash of the original transcript identity, so
@@ -96,6 +99,20 @@ During cutover, a contended migration lock never makes a synchronous hook wait
 past its deadline: it persists sanitized text to `reports/capture-spool/` and
 detaches the waiting importer. Imported spool files remain under `imported/`.
 Unimported spools and capture failure records appear in health output.
+
+Normal hooks also retain a failure marker in `reports/capture-spool/failures/`
+when an explicit transcript is missing or capture raises an I/O, validation,
+database or checkpoint-conflict error. The hook returns nonzero and records only
+the error category, hook source and timestamp, not raw input or exception text.
+Codex scans for a legacy transcript only when the payload omits `transcript_path`;
+an unavailable explicit path must never select another session.
+
+Correlate a marker with the originating session and hook time, then locate and
+import the original transcript. If the file is unavailable, record that recovery
+remains unresolved; a marker contains no conversation text to recover.
+After verifying recovery, preserve the reviewed marker under a `resolved/`
+subdirectory of `failures/`. Health checks the unresolved top-level markers;
+successful later captures do not automatically remove earlier failure evidence.
 
 ```bash
 uv run python scripts/flush.py --drain --limit 10
