@@ -10,10 +10,8 @@ The hook itself does NO API calls - only local file I/O for speed (<10s).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -32,7 +30,7 @@ SCRIPTS_DIR = ROOT / "scripts"
 STATE_DIR = SCRIPTS_DIR
 
 from session_utils import extract_conversation_context  # noqa: E402 - scripts path is configured above.
-from capture_spool import guard_capture_hook, require_transcript_path  # noqa: E402
+from capture_spool import guard_capture_hook, parse_hook_payload, require_transcript_path  # noqa: E402
 
 logging.basicConfig(
     filename=str(SCRIPTS_DIR / "flush.log"),
@@ -48,18 +46,7 @@ MIN_TURNS_TO_FLUSH = 1
 
 @guard_capture_hook(lambda: ROOT, agent="claude_code", source="session-end")
 def main() -> None:
-    # Read hook input from stdin
-    # Claude Code on Windows may pass paths with unescaped backslashes
-    try:
-        raw_input = sys.stdin.read()
-        try:
-            hook_input: dict = json.loads(raw_input)
-        except json.JSONDecodeError:
-            fixed_input = re.sub(r'(?<!\\)\\(?!["\\])', r'\\\\', raw_input)
-            hook_input = json.loads(fixed_input)
-    except (json.JSONDecodeError, ValueError, EOFError) as e:
-        logging.error("Failed to parse stdin: %s", e)
-        return
+    hook_input = parse_hook_payload(sys.stdin.read())
 
     session_id = hook_input.get("session_id", "unknown")
     source = hook_input.get("source", "unknown")

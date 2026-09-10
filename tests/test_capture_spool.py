@@ -216,6 +216,50 @@ def test_available_hook_gate_preserves_existing_hook_behavior(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("name", ["codex-stop", "pre-compact", "session-end"])
+@pytest.mark.parametrize("raw", ['{"secret":"RAW SECRET",', '["RAW SECRET"]', 'null'])
+def test_invalid_hook_payload_is_visible_and_never_selects_another_session(tmp_path, monkeypatch, name, raw):
+    store = MemoryStore(tmp_path)
+    store.initialize()
+    module = load_hook(name, tmp_path, monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(raw))
+    if name == "codex-stop":
+        def unrelated_session():
+            raise AssertionError("Invalid payload must not select a legacy session")
+        monkeypatch.setattr(module, "resolve_legacy_transcript", unrelated_session)
+    assert module.main() == 1
+    events = list((tmp_path / "reports/capture-spool/failures").glob("*.json"))
+    assert len(events) == 1
+    assert "RAW SECRET" not in events[0].read_text()
+    assert store.jobs() == []
+    assert store.get_state("capture_checkpoints", {}) == {}
+
+
+@pytest.mark.parametrize("raw", [
+    r'{"transcript_path":"C:\\Users\\example\\session.jsonl"}',
+    r'{"transcript_path":"C:\Users\example\session.jsonl"}',
+])
+def test_shared_hook_parser_preserves_windows_transcript_paths(raw):
+    assert capture_spool.parse_hook_payload(raw) == {
+        "transcript_path": r"C:\Users\example\session.jsonl",
+    }
+
+
+def test_empty_payload_is_only_allowed_for_legacy_codex():
+    with pytest.raises(ValueError):
+        capture_spool.parse_hook_payload(" \n")
+    assert capture_spool.parse_hook_payload(" \n", allow_empty=True) == {}
+
+
+@pytest.mark.parametrize("raw", ['{"secret":"RAW SECRET",', '["RAW SECRET"]', 'null'])
+def test_cutover_spool_rejects_same_invalid_payloads_without_work(tmp_path, raw):
+    assert capture_spool._spool_hook(tmp_path, raw, agent="codex", source="hook:stop") == 1
+    event = next((tmp_path / "reports/capture-spool/failures").glob("*.json")).read_text()
+    assert "invalid_hook_payload" in event
+    assert "RAW SECRET" not in event
+    assert not list((tmp_path / "reports/capture-spool").glob("*.json"))
+
+
+@pytest.mark.parametrize("name", ["codex-stop", "pre-compact", "session-end"])
 @pytest.mark.parametrize("path_kind", ["missing", "directory", "empty"])
 def test_unlocked_hook_reports_unavailable_transcript(tmp_path, monkeypatch, name, path_kind):
     import health

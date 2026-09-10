@@ -29,7 +29,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from locking import file_lock  # noqa: E402 - scripts path is configured above.
-from capture_spool import guard_capture_hook, require_transcript_path  # noqa: E402
+from capture_spool import guard_capture_hook, parse_hook_payload, require_transcript_path  # noqa: E402
 from session_utils import codex_message_ranges  # noqa: E402
 
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
@@ -55,15 +55,8 @@ class ImportReservation:
 
 
 def parse_hook_input(raw_input: str) -> dict:
-    """Parse the Stop hook JSON payload."""
-    raw_input = raw_input.strip()
-    if not raw_input:
-        return {}
-    try:
-        payload = json.loads(raw_input)
-    except json.JSONDecodeError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    """Allow absent legacy stdin, but never treat malformed input as absence."""
+    return parse_hook_payload(raw_input, allow_empty=True)
 
 
 def load_import_state() -> dict:

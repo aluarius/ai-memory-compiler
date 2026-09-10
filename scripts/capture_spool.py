@@ -28,6 +28,23 @@ from migration_gate import writer_gate
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
+def parse_hook_payload(raw: str, *, allow_empty: bool = False) -> dict[str, Any]:
+    """Parse an object, preserving legacy Windows paths without hiding bad input."""
+    if allow_empty and not raw.strip():
+        return {}
+    try:
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            # Some Windows hook senders do not escape path backslashes.
+            payload = json.loads(re.sub(r'(?<!\\)\\(?!["\\])', r'\\\\', raw))
+    except json.JSONDecodeError:
+        raise ValueError("Invalid hook JSON payload") from None
+    if not isinstance(payload, dict):
+        raise ValueError("Hook input must be an object")
+    return payload
+
+
 def require_transcript_path(value: object) -> Path:
     """Reject unavailable explicit sources without substituting another session."""
     if not isinstance(value, str) or not value.strip():
@@ -162,13 +179,8 @@ def spawn_spool_importer(root: Path) -> bool:
 
 def _spool_hook(root: Path, raw: str, *, agent: str, source: str) -> int:
     try:
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            payload = json.loads(re.sub(r'(?<!\\)\\(?!["\\])', r'\\\\', raw))
-        if not isinstance(payload, dict):
-            raise ValueError("Hook input must be an object")
-    except (json.JSONDecodeError, ValueError):
+        payload = parse_hook_payload(raw)
+    except ValueError:
         _failure_event(root, "invalid_hook_payload", agent=agent, source=source)
         return 1
     if agent == "codex" and payload.get("stop_hook_active") is True:

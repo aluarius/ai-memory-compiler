@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def load_codex_stop_module():
     root = Path(__file__).resolve().parent.parent
@@ -26,7 +28,8 @@ def load_codex_stop_module():
 def test_parse_hook_input_rejects_invalid_json() -> None:
     codex_stop = load_codex_stop_module()
 
-    assert codex_stop.parse_hook_input("not json") == {}
+    with pytest.raises(ValueError):
+        codex_stop.parse_hook_input("not json")
     assert codex_stop.parse_hook_input("") == {}
 
 
