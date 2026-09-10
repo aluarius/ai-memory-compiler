@@ -5,6 +5,7 @@ import errno
 import importlib.util
 import io
 import json
+import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +17,8 @@ import pytest
 
 import capture_spool
 from locking import file_lock
-from memory_store import MemoryStore
+from memory_store import MemoryStore, StoreConflict
+from memory_export import export_memory
 
 
 @pytest.fixture(autouse=True)
@@ -211,6 +213,112 @@ def test_available_hook_gate_preserves_existing_hook_behavior(tmp_path) -> None:
         return "normal"
     assert normal_hook() == "normal"
     assert observed == [False]
+
+
+@pytest.mark.parametrize("name", ["codex-stop", "pre-compact", "session-end"])
+@pytest.mark.parametrize("path_kind", ["missing", "directory", "empty"])
+def test_unlocked_hook_reports_unavailable_transcript(tmp_path, monkeypatch, name, path_kind):
+    import health
+
+    store = MemoryStore(tmp_path)
+    store.initialize()
+    export_memory(store)
+    module = load_hook(name, tmp_path, monkeypatch)
+    path = tmp_path / "private-missing-session.jsonl"
+    if path_kind == "directory":
+        path.mkdir()
+    payload = {"transcript_path": "" if path_kind == "empty" else str(path),
+               "session_id": "private-session", "secret": "RAW SECRET"}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    if name == "codex-stop":
+        # A supplied but unavailable transcript must not import another session.
+        def unrelated_session():
+            raise AssertionError("Explicit transcript must not fall back to scanning")
+        monkeypatch.setattr(module, "resolve_legacy_transcript", unrelated_session)
+    assert module.main() == 1
+    events = list((tmp_path / "reports/capture-spool/failures").glob("*.json"))
+    assert len(events) == 1
+    serialized = events[0].read_text()
+    assert "RAW SECRET" not in serialized
+    assert "private-session" not in serialized
+    assert "private-missing-session" not in serialized
+    assert store.jobs() == []
+    assert store.get_state("capture_checkpoints", {}) == {}
+    monkeypatch.setattr(health, "KNOWLEDGE_DIR", tmp_path / "knowledge")
+    monkeypatch.setattr(health, "load_runtime_config", lambda: {})
+    report = health.collect_health()
+    assert report.status == "attention"
+    assert report.export_drift == []
+    assert report.capture_spool_files == [str(events[0].relative_to(tmp_path))]
+
+
+@pytest.mark.parametrize("error", [OSError, sqlite3.OperationalError, ValueError, StoreConflict])
+def test_unlocked_hook_records_safe_failure_without_database(tmp_path, error):
+    @capture_spool.guard_capture_hook(lambda: tmp_path, agent="claude_code", source="session-end")
+    def broken_hook():
+        raise error("RAW SECRET from failed capture")
+
+    assert broken_hook() == 1
+    event = next((tmp_path / "reports/capture-spool/failures").glob("*.json")).read_text()
+    assert error.__name__ in event
+    assert "RAW SECRET" not in event
+
+
+def test_unlocked_hook_does_not_swallow_cancellation(tmp_path):
+    @capture_spool.guard_capture_hook(lambda: tmp_path, agent="claude_code", source="session-end")
+    def cancelled_hook():
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        cancelled_hook()
+    assert not (tmp_path / "reports/capture-spool/failures").exists()
+
+
+@pytest.mark.parametrize("name", ["codex-stop", "pre-compact", "session-end"])
+def test_unlocked_hook_still_captures_complete_valid_transcript(tmp_path, monkeypatch, name):
+    import capture_service
+
+    store = MemoryStore(tmp_path)
+    store.initialize()
+    module = load_hook(name, tmp_path, monkeypatch)
+    path = tmp_path / "session.jsonl"
+    transcript(path, codex=name == "codex-stop")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"transcript_path": str(path)})))
+    monkeypatch.setattr(capture_service, "spawn_worker", lambda store, ids: True)
+    assert module.main() in (None, 0)
+    context = "".join(job["context"] for job in store.jobs())
+    assert "Full beginning" in context and "COMPLETE END" in context
+    assert "super-secret-value" not in context
+    assert len(store.get_state("capture_checkpoints")) == 1
+    assert not (tmp_path / "reports/capture-spool/failures").exists()
+
+
+def test_codex_hook_without_transcript_field_retains_legacy_discovery(tmp_path, monkeypatch):
+    import capture_service
+
+    store = MemoryStore(tmp_path)
+    store.initialize()
+    module = load_hook("codex-stop", tmp_path, monkeypatch)
+    transcript(tmp_path / "rollout-fixture.jsonl", codex=True)
+    monkeypatch.setattr(module, "CODEX_SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
+    monkeypatch.setattr(capture_service, "spawn_worker", lambda store, ids: True)
+    assert module.main() in (None, 0)
+    assert store.jobs()[0]["metadata"]["session_id"] == "s1"
+    assert "COMPLETE END" in "".join(job["context"] for job in store.jobs())
+
+
+def test_unlocked_hook_returns_failure_when_marker_cannot_be_written(tmp_path, monkeypatch, capsys):
+    @capture_spool.guard_capture_hook(lambda: tmp_path, agent="claude_code", source="session-end")
+    def broken_hook():
+        raise OSError("RAW SECRET")
+
+    def unavailable(*args, **kwargs):
+        raise OSError("RAW SECRET from filesystem")
+
+    monkeypatch.setattr(capture_spool, "atomic_write", unavailable)
+    assert broken_hook() == 1
+    assert "could not be persisted" in capsys.readouterr().err
 
 
 def test_windows_nonblocking_lock_uses_immediate_mode_and_never_unlocks_failed_acquisition(tmp_path, monkeypatch) -> None:

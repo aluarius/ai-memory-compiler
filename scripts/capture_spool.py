@@ -7,6 +7,7 @@ import errno
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -21,10 +22,20 @@ from capture_service import (
     MAX_JOB_CHARS, PROVENANCE_KEYS, read_messages, sanitize, sanitize_metadata, spawn_worker,
 )
 from memory_export import ExportConflict, atomic_write
-from memory_store import MemoryStore, content_hash, timestamp
+from memory_store import MemoryStore, StoreConflict, content_hash, timestamp
 from migration_gate import writer_gate
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def require_transcript_path(value: object) -> Path:
+    """Reject unavailable explicit sources without substituting another session."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Missing transcript path")
+    path = Path(value).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError("Transcript is not an available file")
+    return path
 
 
 @contextmanager
@@ -190,11 +201,19 @@ def guard_capture_hook(root: Callable[[], Path], *, agent: str, source: str) -> 
         @wraps(function)
         def guarded(*args: Any, **kwargs: Any) -> Any:
             current = root().resolve()
-            with try_file_lock(current / "scripts/.locks/migration.lock") as acquired:
-                if acquired:
-                    return function(*args, **kwargs)
             try:
-                return _spool_hook(current, sys.stdin.read(), agent=agent, source=source)
+                try:
+                    with try_file_lock(current / "scripts/.locks/migration.lock") as acquired:
+                        if acquired:
+                            return function(*args, **kwargs)
+                    return _spool_hook(current, sys.stdin.read(), agent=agent, source=source)
+                except (OSError, ValueError, sqlite3.Error, StoreConflict) as exc:
+                    # A failed normal hook needs the same durable visibility as
+                    # cutover spooling, even when SQLite itself is unavailable.
+                    _failure_event(current, f"capture_hook_failed:{type(exc).__name__}",
+                                   agent=agent, source=source)
+                    print("Capture failed; inspect health and original transcript.", file=sys.stderr)
+                    return 1
             except OSError:
                 # Even the failure event may be unwritable; the raw transcript
                 # remains intact and no ingestion checkpoint was advanced.

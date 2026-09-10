@@ -29,7 +29,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from locking import file_lock  # noqa: E402 - scripts path is configured above.
-from capture_spool import guard_capture_hook  # noqa: E402
+from capture_spool import guard_capture_hook, require_transcript_path  # noqa: E402
 from session_utils import codex_message_ranges  # noqa: E402
 
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
@@ -251,13 +251,10 @@ def read_session_meta(transcript: Path) -> dict:
 
 def resolve_transcript_from_hook(hook_input: dict) -> tuple[Path | None, dict]:
     """Resolve transcript and metadata from the official Stop hook payload."""
-    transcript_path_str = hook_input.get("transcript_path")
-    if not isinstance(transcript_path_str, str) or not transcript_path_str:
+    if "transcript_path" not in hook_input:
         return None, {}
 
-    transcript = Path(transcript_path_str).expanduser()
-    if not transcript.exists():
-        return None, {}
+    transcript = require_transcript_path(hook_input["transcript_path"])
 
     meta = read_session_meta(transcript)
     session_id = hook_input.get("session_id")

@@ -32,7 +32,7 @@ SCRIPTS_DIR = ROOT / "scripts"
 STATE_DIR = SCRIPTS_DIR
 
 from session_utils import extract_conversation_context  # noqa: E402 - scripts path is configured above.
-from capture_spool import guard_capture_hook  # noqa: E402
+from capture_spool import guard_capture_hook, require_transcript_path  # noqa: E402
 
 logging.basicConfig(
     filename=str(SCRIPTS_DIR / "flush.log"),
@@ -67,14 +67,7 @@ def main() -> None:
 
     logging.info("SessionEnd fired: session=%s source=%s", session_id, source)
 
-    if not transcript_path_str or not isinstance(transcript_path_str, str):
-        logging.info("SKIP: no transcript path")
-        return
-
-    transcript_path = Path(transcript_path_str)
-    if not transcript_path.exists():
-        logging.info("SKIP: transcript missing: %s", transcript_path_str)
-        return
+    transcript_path = require_transcript_path(transcript_path_str)
 
     from memory_store import MemoryStore
     if MemoryStore.is_initialized(ROOT):
