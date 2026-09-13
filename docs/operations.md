@@ -187,6 +187,53 @@ A 30-minute debounce limits repeated automatic triggers.
 health. Review [the launchd template](launchd-maintenance.plist) before
 installing a scheduler; avoid duplicate schedules and duplicate hooks.
 
+### macOS scheduler launch failures
+
+Database health does not prove that the nightly scheduler ran. Check the latest
+completed pass in `scripts/maintenance.log` and the installed LaunchAgent when
+maintenance output stops advancing:
+
+```bash
+launchctl print "gui/$(id -u)/com.aluarius.memory-compiler-maintenance"
+tail -60 scripts/maintenance.log
+tail -40 /tmp/memory-compiler-maintenance.err
+```
+
+A process can fail before Python starts, leaving both application logs and
+stderr unchanged. On 2026-09-13, the agent reported `OS_REASON_CODESIGNING` and
+its `uv` crash report showed `CODESIGNING: Launch Constraint Violation` after
+a Homebrew `uv` update. Inspect the matching report in
+`~/Library/Logs/DiagnosticReports/`; do not diagnose this from exit `-9` alone.
+Apple describes these checks in its
+[launch constraints documentation](https://developer.apple.com/documentation/Security/applying-launch-environment-and-library-constraints).
+
+Verify the installed executable and its signature first. Use the paths from
+your installed plist if they differ from this installation:
+
+```bash
+/opt/homebrew/bin/uv --version
+codesign --verify --verbose=2 /opt/homebrew/bin/uv
+plutil -lint "$HOME/Library/LaunchAgents/com.aluarius.memory-compiler-maintenance.plist"
+```
+
+If the updated executable passes verification and the agent is not running,
+reload only this agent's registration, then retry its normal maintenance pass.
+Do not disable signature enforcement, remove quarantine attributes, or re-sign
+the executable to hide an unexplained verification failure.
+
+```bash
+launchctl bootout "gui/$(id -u)/com.aluarius.memory-compiler-maintenance"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.aluarius.memory-compiler-maintenance.plist"
+launchctl kickstart "gui/$(id -u)/com.aluarius.memory-compiler-maintenance"
+```
+
+The retry uses the regular pipeline and can call the configured model, including
+Sunday's full lint. A successful `kickstart` only proves that launchd accepted
+the request. Confirm a fresh completed pass, agent exit code `0`, and
+`uv run python scripts/health.py --json --strict` before declaring recovery.
+Keep the crash report and recovery contexts; this procedure does not repair or
+roll back canonical data.
+
 ## Markdown export and Obsidian
 
 ```bash
