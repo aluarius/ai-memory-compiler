@@ -220,9 +220,10 @@ The project `codex_bin` pin takes precedence over a launchd
 
 ## Status and references
 
-The SQLite implementation and cutover acceptance gate are being integrated.
-The copied-corpus retrieval measurement is complete; it does not establish
-that the live queue has drained or the live installation has switched over.
+The September 2026 SQLite cutover passed integrated acceptance, and
+`scripts/memory.sqlite` is the canonical store. Check current queue and
+compiler state with `uv run python scripts/health.py --json --strict`;
+the copied-corpus retrieval measurement is historical, not a live status.
 
 - [Agent and compiler contract](AGENTS.md)
 - [Operations, backup and recovery](docs/operations.md)
