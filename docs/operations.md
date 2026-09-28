@@ -187,6 +187,13 @@ A 30-minute debounce limits repeated automatic triggers.
 health. Review [the launchd template](launchd-maintenance.plist) before
 installing a scheduler; avoid duplicate schedules and duplicate hooks.
 
+The installed template runs at 19:00 local time. Its former 04:30 run
+repeatedly executed during macOS DarkWake;
+Codex WebSocket requests returned HTTP 403 and compilation timed out.
+After changing the installed plist, verify the registered calendar trigger
+and a fresh completed maintenance pass. An evening schedule does not
+guarantee future network or credential availability.
+
 ### macOS scheduler launch failures
 
 Database health does not prove that the nightly scheduler ran. Check the latest

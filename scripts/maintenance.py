@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     codes.append(run_step("lint-fix", uv + [str(SCRIPTS_DIR / "lint.py"), "--fix"]))
 
     # Post-compile covers the normal path; this drains anything left over.
-    # At 04:30 a locked keychain makes the LLM call fail harmlessly.
+    # A locked keychain can still make the model call fail; work remains queued.
     codes.append(run_step("index-rewrite", uv + [str(SCRIPTS_DIR / "index_rewrite.py")]))
     codes.append(run_step("kb-index", uv + [str(SCRIPTS_DIR / "kb_db.py"), "rebuild"]))
     if (SCRIPTS_DIR / "memory.sqlite").exists() and (SCRIPTS_DIR / "semantic-index.sqlite").exists():
