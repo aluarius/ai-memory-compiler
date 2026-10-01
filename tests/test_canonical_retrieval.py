@@ -87,7 +87,10 @@ def test_canonical_search_filters_project_before_limit_and_refreshes(tmp_path):
 
 
 def test_session_hook_reads_cwd_and_shared_canonical_rows(tmp_path, monkeypatch, capsys):
-    populated_store(tmp_path)
+    store = populated_store(tmp_path)
+    # Keep shared context eligible as a hub after the fixture's recent window.
+    store.record_read("concepts/shared")
+    store.record_read("concepts/shared")
     path = Path(__file__).parents[1] / "hooks" / "session-start.py"
     spec = importlib.util.spec_from_file_location("canonical_session_start", path)
     mod = importlib.util.module_from_spec(spec)
@@ -101,6 +104,7 @@ def test_session_hook_reads_cwd_and_shared_canonical_rows(tmp_path, monkeypatch,
     assert "concepts/target" in context
     assert "concepts/shared" in context
     assert "concepts/wrong" not in context
+    assert "2 articles in scope" in context
     assert len(context.encode("utf-8")) <= 9500
 
 

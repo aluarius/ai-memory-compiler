@@ -172,7 +172,7 @@ def build_kb_section(
     recent, hubs = select_tier_rows(rows, now, usage=usage)
 
     header = (
-        f"## Knowledge Base (tiered view: {total} articles total)\n\n"
+        f"## Knowledge Base (tiered view: {total} articles in scope)\n\n"
         "Project matches, recent articles, and long-lived hubs below. Use the "
         "`knowledge-base` MCP tools search_knowledge, read_article, list_articles "
         "for complete canonical knowledge. An optional Markdown export is at "
