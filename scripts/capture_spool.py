@@ -45,6 +45,11 @@ def parse_hook_payload(raw: str, *, allow_empty: bool = False) -> dict[str, Any]
     return payload
 
 
+def codex_has_no_transcript(payload: dict[str, Any]) -> bool:
+    """Distinguish schema-valid null from a legacy payload without this field."""
+    return "transcript_path" in payload and payload["transcript_path"] is None
+
+
 def require_transcript_path(value: object) -> Path:
     """Reject unavailable explicit sources without substituting another session."""
     if not isinstance(value, str) or not value.strip():
@@ -150,13 +155,26 @@ def persist_spooled_context(root: Path, context: str, metadata: dict[str, Any]) 
     return path
 
 
-def _failure_event(root: Path, reason: str, *, agent: str, source: str) -> None:
-    """Record an operational category without transcript text or raw hook input."""
+def _failure_event(
+    root: Path, reason: str, *, agent: str, source: str,
+    error: BaseException | None = None,
+) -> None:
+    """Record a category and code location without input, exception text or locals."""
     path = root / "reports/capture-spool/failures" / f"{uuid.uuid4()}.json"
-    atomic_write(path, json.dumps({
+    event: dict[str, Any] = {
         "kind": "capture_spool_failed", "reason": reason,
         "agent": agent, "source": source, "created": timestamp(),
-    }) + "\n")
+    }
+    frame = error.__traceback__ if error is not None else None
+    if frame is not None:
+        while frame.tb_next is not None:
+            frame = frame.tb_next
+        event["error_location"] = {
+            "file": Path(frame.tb_frame.f_code.co_filename).name,
+            "function": frame.tb_frame.f_code.co_name,
+            "line": frame.tb_lineno,
+        }
+    atomic_write(path, json.dumps(event) + "\n")
 
 
 def spawn_spool_importer(root: Path) -> bool:
@@ -183,7 +201,9 @@ def _spool_hook(root: Path, raw: str, *, agent: str, source: str) -> int:
     except ValueError:
         _failure_event(root, "invalid_hook_payload", agent=agent, source=source)
         return 1
-    if agent == "codex" and payload.get("stop_hook_active") is True:
+    if agent == "codex" and (
+        payload.get("stop_hook_active") is True or codex_has_no_transcript(payload)
+    ):
         return 0
     transcript_path = payload.get("transcript_path")
     if not isinstance(transcript_path, str) or not transcript_path:
@@ -223,7 +243,7 @@ def guard_capture_hook(root: Callable[[], Path], *, agent: str, source: str) -> 
                     # A failed normal hook needs the same durable visibility as
                     # cutover spooling, even when SQLite itself is unavailable.
                     _failure_event(current, f"capture_hook_failed:{type(exc).__name__}",
-                                   agent=agent, source=source)
+                                   agent=agent, source=source, error=exc)
                     print("Capture failed; inspect health and original transcript.", file=sys.stderr)
                     return 1
             except OSError:

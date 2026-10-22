@@ -29,7 +29,9 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from locking import file_lock  # noqa: E402 - scripts path is configured above.
-from capture_spool import guard_capture_hook, parse_hook_payload, require_transcript_path  # noqa: E402
+from capture_spool import (  # noqa: E402
+    codex_has_no_transcript, guard_capture_hook, parse_hook_payload, require_transcript_path,
+)
 from session_utils import codex_message_ranges  # noqa: E402
 
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
@@ -244,7 +246,7 @@ def read_session_meta(transcript: Path) -> dict:
 
 def resolve_transcript_from_hook(hook_input: dict) -> tuple[Path | None, dict]:
     """Resolve transcript and metadata from the official Stop hook payload."""
-    if "transcript_path" not in hook_input:
+    if "transcript_path" not in hook_input or codex_has_no_transcript(hook_input):
         return None, {}
 
     transcript = require_transcript_path(hook_input["transcript_path"])
@@ -333,7 +335,9 @@ def main() -> None:
         return
 
     transcript, meta = resolve_transcript_from_hook(hook_input)
-    if transcript is None:
+    # A schema-valid null means no transcript exists, not permission to scan
+    # another session. Filesystem fallback is only for older absent-field input.
+    if transcript is None and "transcript_path" not in hook_input:
         transcript, meta = resolve_legacy_transcript()
     if transcript is None:
         return

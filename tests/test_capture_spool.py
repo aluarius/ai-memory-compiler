@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from threading import Barrier, Event
 from types import SimpleNamespace
@@ -306,6 +307,11 @@ def test_unlocked_hook_records_safe_failure_without_database(tmp_path, error):
     event = next((tmp_path / "reports/capture-spool/failures").glob("*.json")).read_text()
     assert error.__name__ in event
     assert "RAW SECRET" not in event
+    location = json.loads(event)["error_location"]
+    assert location["file"] == Path(__file__).name
+    assert location["function"] == "broken_hook"
+    assert isinstance(location["line"], int) and location["line"] > 0
+    assert str(Path(__file__).resolve().parent) not in event
 
 
 def test_unlocked_hook_does_not_swallow_cancellation(tmp_path):
@@ -382,3 +388,29 @@ def test_windows_nonblocking_lock_uses_immediate_mode_and_never_unlocks_failed_a
     with capture_spool.try_file_lock(tmp_path / "gate.lock") as acquired:
         assert acquired is False
     assert calls == [fake.LK_NBLCK]
+
+
+@pytest.mark.parametrize("gate_available", [True, False])
+def test_codex_schema_null_transcript_skips_capture_without_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gate_available: bool,
+) -> None:
+    store = MemoryStore(tmp_path)
+    store.initialize()
+    module = load_hook("codex-stop", tmp_path, monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
+        "session_id": "ephemeral-session", "transcript_path": None,
+        "hook_event_name": "Stop", "stop_hook_active": False,
+        "last_assistant_message": "RAW SECRET",
+    })))
+
+    def unrelated_session() -> None:
+        raise AssertionError("A null transcript must not select another session")
+
+    monkeypatch.setattr(module, "resolve_legacy_transcript", unrelated_session)
+    lock = nullcontext() if gate_available else file_lock(tmp_path / "scripts/.locks/migration.lock")
+    with lock:
+        assert module.main() in (None, 0)
+    assert store.jobs() == []
+    assert store.get_state("capture_checkpoints", {}) == {}
+    assert not list((tmp_path / "reports/capture-spool").glob("*.json"))
+    assert not (tmp_path / "reports/capture-spool/failures").exists()
